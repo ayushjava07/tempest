@@ -117,6 +117,8 @@ func registerCommands(root *Command) {
 		serverCmd(),
 		workflowsCmd(),
 		runCmd(),
+		configCmd(),
+		adminCmd(),
 		migrateCmd(),
 		versionCmd(),
 	}

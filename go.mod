@@ -4,6 +4,7 @@ go 1.26.1
 
 require (
 	github.com/jackc/pgx/v5 v5.7.1
+	go.uber.org/goleak v1.3.0
 	google.golang.org/grpc v1.68.0
 )
 
