@@ -10,8 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/tempest-io/tempest/internal/persistence"
-	ttypes "github.com/tempest-io/tempest/pkg/types"
 	"github.com/tempest-io/tempest/pkg/errors"
+	ttypes "github.com/tempest-io/tempest/pkg/types"
 )
 
 type Store struct {
@@ -159,13 +159,13 @@ func (s *Store) GetRun(ctx context.Context, namespace ttypes.Namespace, id strin
 	_ = json.Unmarshal(steps, &stepRuns)
 	return &ttypes.Run{
 		ID: rid, Namespace: ttypes.Namespace(ns),
-		Workflow:  ttypes.WorkflowID{Name: wfName, Version: wfVer},
-		State:     ttypes.RunState(state),
-		Input:     runInput,
-		Steps:     stepRuns,
-		Error:     errMsg,
-		CreatedAt: createdAt,
-		StartedAt: startedAt,
+		Workflow:   ttypes.WorkflowID{Name: wfName, Version: wfVer},
+		State:      ttypes.RunState(state),
+		Input:      runInput,
+		Steps:      stepRuns,
+		Error:      errMsg,
+		CreatedAt:  createdAt,
+		StartedAt:  startedAt,
 		FinishedAt: finishedAt,
 	}, nil
 }
@@ -203,13 +203,13 @@ func scanRuns(rows pgx.Rows) ([]ttypes.Run, error) {
 		_ = json.Unmarshal(steps, &stepRuns)
 		out = append(out, ttypes.Run{
 			ID: rid, Namespace: ttypes.Namespace(ns),
-			Workflow:  ttypes.WorkflowID{Name: wfName, Version: wfVer},
-			State:     ttypes.RunState(state),
-			Input:     runInput,
-			Steps:     stepRuns,
-			Error:     errMsg,
-			CreatedAt: createdAt,
-			StartedAt: startedAt,
+			Workflow:   ttypes.WorkflowID{Name: wfName, Version: wfVer},
+			State:      ttypes.RunState(state),
+			Input:      runInput,
+			Steps:      stepRuns,
+			Error:      errMsg,
+			CreatedAt:  createdAt,
+			StartedAt:  startedAt,
 			FinishedAt: finishedAt,
 		})
 	}
