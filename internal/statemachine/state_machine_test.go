@@ -125,3 +125,41 @@ func TestDeliveryStatus_Values(t *testing.T) {
 		}
 	}
 }
+
+func TestStateMachine_Transitions(t *testing.T) {
+	sm := New()
+
+	if !sm.CanTransition(ttypes.StatePending, ttypes.StateQueued) {
+		t.Errorf("expected pending -> queued to be legal")
+	}
+	if !sm.CanTransition(ttypes.StateQueued, ttypes.StateRunning) {
+		t.Errorf("expected queued -> running to be legal")
+	}
+	if !sm.CanTransition(ttypes.StateRunning, ttypes.StateSucceeded) {
+		t.Errorf("expected running -> succeeded to be legal")
+	}
+
+	// Illegal transitions
+	if sm.CanTransition(ttypes.StatePending, ttypes.StateSucceeded) {
+		t.Errorf("pending -> succeeded should be illegal")
+	}
+	if sm.CanTransition(ttypes.StateSucceeded, ttypes.StateRunning) {
+		t.Errorf("succeeded -> running should be illegal")
+	}
+
+	// Hook invocation
+	hookCalled := false
+	sm.RegisterHook(func(from, to ttypes.RunState) {
+		hookCalled = true
+	})
+
+	err := sm.Transition(ttypes.StatePending, ttypes.StateQueued)
+	if err != nil || !hookCalled {
+		t.Errorf("expected transition to succeed and call hook: %v", err)
+	}
+
+	err = sm.Transition(ttypes.StatePending, ttypes.StateSucceeded)
+	if err == nil {
+		t.Errorf("expected error on illegal transition, got nil")
+	}
+}
