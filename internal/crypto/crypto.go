@@ -4,75 +4,96 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"crypto/subtle"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/hex"
+	"encoding/pem"
 	"errors"
-	"fmt"
-	"io"
 )
 
-var (
-	ErrInvalidKeyLength = errors.New("key must be exactly 32 bytes for AES-256")
-	ErrCiphertextShort  = errors.New("ciphertext too short")
-	ErrDecryptionFailed = errors.New("failed to decrypt payload: authentication failed")
-)
-
-// Encrypt encrypts plaintext using AES-256-GCM with a random 12-byte nonce.
-// The nonce is prepended to the returned ciphertext.
-func Encrypt(key, plaintext []byte) ([]byte, error) {
-	if len(key) != 32 {
-		return nil, ErrInvalidKeyLength
-	}
-
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, fmt.Errorf("create cipher: %w", err)
-	}
-
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("create GCM: %w", err)
-	}
-
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, fmt.Errorf("read nonce: %w", err)
-	}
-
-	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
-	return ciphertext, nil
+func GenerateAESKey() ([]byte, error) {
+	key := make([]byte, 32)
+	_, err := rand.Read(key)
+	return key, err
 }
 
-// Decrypt decrypts ciphertext produced by Encrypt using the 32-byte key.
-func Decrypt(key, ciphertext []byte) ([]byte, error) {
-	if len(key) != 32 {
-		return nil, ErrInvalidKeyLength
-	}
-
+func AESEncrypt(key, plaintext []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return nil, fmt.Errorf("create cipher: %w", err)
+		return nil, err
 	}
-
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return nil, fmt.Errorf("create GCM: %w", err)
+		return nil, err
 	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	return gcm.Seal(nonce, nonce, plaintext, nil), nil
+}
 
+func AESDecrypt(key, ciphertext []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
 	nonceSize := gcm.NonceSize()
 	if len(ciphertext) < nonceSize {
-		return nil, ErrCiphertextShort
+		return nil, errors.New("ciphertext too short")
 	}
-
-	nonce, actualCiphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
-	plaintext, err := gcm.Open(nil, nonce, actualCiphertext, nil)
-	if err != nil {
-		return nil, ErrDecryptionFailed
-	}
-
-	return plaintext, nil
+	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	return gcm.Open(nil, nonce, ciphertext, nil)
 }
 
-// ConstantTimeCompare performs a constant-time comparison of two byte slices to mitigate timing attacks.
-func ConstantTimeCompare(a, b []byte) bool {
-	return subtle.ConstantTimeCompare(a, b) == 1
+func GenerateRSAKeyPair(bits int) (*rsa.PrivateKey, error) {
+	return rsa.GenerateKey(rand.Reader, bits)
+}
+
+func RSAEncrypt(pub *rsa.PublicKey, plaintext []byte) ([]byte, error) {
+	return rsa.EncryptOAEP(sha256.New(), rand.Reader, pub, plaintext, nil)
+}
+
+func RSADecrypt(priv *rsa.PrivateKey, ciphertext []byte) ([]byte, error) {
+	return rsa.DecryptOAEP(sha256.New(), rand.Reader, priv, ciphertext, nil)
+}
+
+func EncodePrivateKey(key *rsa.PrivateKey) []byte {
+	return pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	})
+}
+
+func DecodePrivateKey(data []byte) (*rsa.PrivateKey, error) {
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, errors.New("invalid PEM")
+	}
+	return x509.ParsePKCS1PrivateKey(block.Bytes)
+}
+
+func EncodePublicKey(key *rsa.PublicKey) []byte {
+	return pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PUBLIC KEY",
+		Bytes: x509.MarshalPKCS1PublicKey(key),
+	})
+}
+
+func DecodePublicKey(data []byte) (*rsa.PublicKey, error) {
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, errors.New("invalid PEM")
+	}
+	return x509.ParsePKCS1PublicKey(block.Bytes)
+}
+
+func Hash(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
 }

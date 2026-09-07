@@ -1,54 +1,94 @@
 package artifact
 
 import (
-	"bytes"
+	"context"
 	"strings"
 	"testing"
 )
 
-func TestStore_PutAndGet(t *testing.T) {
-	s := NewStore()
-
-	content := "step output data artifact"
-	art, err := s.Put("run-1", "result.json", "application/json", strings.NewReader(content))
+func TestMemoryStore_SaveLoad(t *testing.T) {
+	ms := NewMemoryStore()
+	art := &Artifact{ID: "test-1", Name: "test.txt", ContentType: "text/plain"}
+	data := strings.NewReader("hello world")
+	if err := ms.Save(context.Background(), art, data); err != nil {
+		t.Fatal(err)
+	}
+	loaded, reader, err := ms.Load(context.Background(), "test-1")
 	if err != nil {
-		t.Fatalf("failed to put artifact: %v", err)
+		t.Fatal(err)
 	}
-
-	if art.Size != int64(len(content)) {
-		t.Errorf("expected size %d, got %d", len(content), art.Size)
+	if loaded.Name != "test.txt" {
+		t.Error("name mismatch")
 	}
-
-	fetched, err := s.Get(art.ID)
-	if err != nil {
-		t.Fatalf("failed to get artifact: %v", err)
-	}
-
-	if !bytes.Equal(fetched.Data, []byte(content)) {
-		t.Errorf("content mismatch: %s != %s", fetched.Data, content)
-	}
-
-	_, err = s.Get("unknown")
-	if err != ErrArtifactNotFound {
-		t.Errorf("expected ErrArtifactNotFound, got %v", err)
+	buf := make([]byte, loaded.Size)
+	reader.Read(buf)
+	if string(buf) != "hello world" {
+		t.Error("data mismatch")
 	}
 }
 
-func TestStore_LogsStreaming(t *testing.T) {
-	s := NewStore()
-
-	s.AppendLogChunk("run-1", "step-1", []byte("line 1\n"))
-	s.AppendLogChunk("run-1", "step-1", []byte("line 2\n"))
-
-	logs := s.GetLogs("run-1", "step-1")
-	expected := "line 1\nline 2\n"
-
-	if string(logs) != expected {
-		t.Errorf("expected %q, got %q", expected, string(logs))
+func TestMemoryStore_Delete(t *testing.T) {
+	ms := NewMemoryStore()
+	art := &Artifact{ID: "del-1", Name: "del.txt"}
+	ms.Save(context.Background(), art, strings.NewReader("data"))
+	if err := ms.Delete(context.Background(), "del-1"); err != nil {
+		t.Fatal(err)
 	}
+	if _, _, err := ms.Load(context.Background(), "del-1"); err == nil {
+		t.Error("expected not found")
+	}
+}
 
-	emptyLogs := s.GetLogs("run-1", "non-existent")
-	if emptyLogs != nil {
-		t.Errorf("expected nil for non-existent step logs")
+func TestMemoryStore_List(t *testing.T) {
+	ms := NewMemoryStore()
+	ms.Save(context.Background(), &Artifact{ID: "a", Name: "a.txt"}, strings.NewReader("a"))
+	ms.Save(context.Background(), &Artifact{ID: "b", Name: "b.txt"}, strings.NewReader("b"))
+	list, err := ms.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 {
+		t.Errorf("expected 2, got %d", len(list))
+	}
+}
+
+func TestManager_Store(t *testing.T) {
+	m := NewManager(NewMemoryStore())
+	art := &Artifact{Name: "managed.txt", ContentType: "text/plain"}
+	if err := m.Store(context.Background(), art, strings.NewReader("managed")); err != nil {
+		t.Fatal(err)
+	}
+	if art.ID == "" {
+		t.Error("expected generated ID")
+	}
+}
+
+func TestManager_Get(t *testing.T) {
+	m := NewManager(NewMemoryStore())
+	art := &Artifact{ID: "get-1", Name: "get.txt"}
+	m.Store(context.Background(), art, strings.NewReader("data"))
+	loaded, reader, err := m.Get(context.Background(), "get-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ID != "get-1" {
+		t.Error("ID mismatch")
+	}
+	buf := make([]byte, loaded.Size)
+	reader.Read(buf)
+	if string(buf) != "data" {
+		t.Error("data mismatch")
+	}
+}
+
+func TestArtifact_Checksum(t *testing.T) {
+	ms := NewMemoryStore()
+	art := &Artifact{ID: "check-1", Name: "check.txt"}
+	ms.Save(context.Background(), art, strings.NewReader("test data"))
+	if art.Checksum == "" {
+		t.Error("expected checksum")
+	}
+	if len(art.Checksum) != 64 {
+		t.Errorf("expected 64 char checksum, got %d", len(art.Checksum))
 	}
 }

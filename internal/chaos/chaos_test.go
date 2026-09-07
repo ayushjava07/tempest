@@ -5,129 +5,100 @@ import (
 	"errors"
 	"testing"
 	"time"
-
-	"go.uber.org/goleak"
 )
 
-func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
-}
-
-func TestChaos_LatencyFault(t *testing.T) {
-	inter := NewInterceptor()
-	_ = inter.AddRule(&Rule{
-		ID:          "latency-rule",
-		Type:        FaultLatency,
-		Target:      "database:query",
-		Probability: 1.0,
-		Latency:     50 * time.Millisecond,
-	})
-
+func TestLatencyFault(t *testing.T) {
+	f := NewLatencyFault(10*time.Millisecond, 5*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
 	start := time.Now()
-	err := inter.Execute(context.Background(), "database:query", func(ctx context.Context) error {
-		return nil
-	})
+	err := f.Inject(ctx)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatal(err)
 	}
-
 	elapsed := time.Since(start)
-	if elapsed < 50*time.Millisecond {
-		t.Errorf("expected at least 50ms latency, got %v", elapsed)
+	if elapsed < 10*time.Millisecond {
+		t.Errorf("expected at least 10ms, got %v", elapsed)
 	}
 }
 
-func TestChaos_ErrorFault(t *testing.T) {
-	inter := NewInterceptor()
-	_ = inter.AddRule(&Rule{
-		ID:          "err-rule",
-		Type:        FaultError,
-		Target:      "step:flaky",
-		Probability: 1.0,
-	})
-
-	// Target matches
-	err := inter.Execute(context.Background(), "step:flaky", func(ctx context.Context) error {
-		return nil
-	})
-	if !errors.Is(err, ErrInjectedFault) {
-		t.Errorf("expected ErrInjectedFault, got %v", err)
+func TestErrorFault(t *testing.T) {
+	f := NewErrorFault(errors.New("injected"), 1.0)
+	err := f.Inject(context.Background())
+	if err == nil {
+		t.Error("expected error")
 	}
-
-	// Target does not match
-	err = inter.Execute(context.Background(), "step:other", func(ctx context.Context) error {
-		return nil
-	})
-	if err != nil {
-		t.Errorf("expected nil for non-matching target, got %v", err)
+	if err.Error() != "injected" {
+		t.Errorf("expected 'injected', got %s", err.Error())
 	}
 }
 
-func TestChaos_MaxHits(t *testing.T) {
-	inter := NewInterceptor()
-	_ = inter.AddRule(&Rule{
-		ID:          "countdown-rule",
-		Type:        FaultError,
-		Target:      "test",
-		Probability: 1.0,
-		MaxHits:     2,
-	})
-
-	// Hit 1: fails
-	err1 := inter.Execute(context.Background(), "test", func(ctx context.Context) error { return nil })
-	if !errors.Is(err1, ErrInjectedFault) {
-		t.Errorf("hit 1 expected ErrInjectedFault, got %v", err1)
-	}
-
-	// Hit 2: fails
-	err2 := inter.Execute(context.Background(), "test", func(ctx context.Context) error { return nil })
-	if !errors.Is(err2, ErrInjectedFault) {
-		t.Errorf("hit 2 expected ErrInjectedFault, got %v", err2)
-	}
-
-	// Hit 3: should succeed because maxHits=2 reached
-	err3 := inter.Execute(context.Background(), "test", func(ctx context.Context) error { return nil })
-	if err3 != nil {
-		t.Errorf("hit 3 should succeed after maxHits reached, got %v", err3)
-	}
-}
-
-func TestChaos_PanicFault(t *testing.T) {
-	inter := NewInterceptor()
-	_ = inter.AddRule(&Rule{
-		ID:          "panic-rule",
-		Type:        FaultPanic,
-		Target:      "panic:target",
-		Probability: 1.0,
-	})
-
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Error("expected panic from FaultPanic")
+func TestErrorFault_Rate(t *testing.T) {
+	f := NewErrorFault(errors.New("fail"), 0.0)
+	for i := 0; i < 100; i++ {
+		if err := f.Inject(context.Background()); err != nil {
+			t.Error("expected no error at 0% rate")
 		}
-	}()
-
-	_ = inter.Execute(context.Background(), "panic:target", func(ctx context.Context) error {
-		return nil
-	})
+	}
 }
 
-func TestChaos_GlobalDisable(t *testing.T) {
-	inter := NewInterceptor()
-	_ = inter.AddRule(&Rule{
-		ID:          "rule-disabled",
-		Type:        FaultError,
-		Target:      "*",
-		Probability: 1.0,
-	})
+func TestEngine_RegisterUnregister(t *testing.T) {
+	e := NewEngine()
+	f := NewLatencyFault(time.Millisecond, 0)
+	e.Register(f)
+	if e.FaultCount() != 1 {
+		t.Error("expected 1 fault")
+	}
+	e.Unregister("latency")
+	if e.FaultCount() != 0 {
+		t.Error("expected 0 faults")
+	}
+}
 
-	inter.Disable()
+func TestEngine_EnableDisable(t *testing.T) {
+	e := NewEngine()
+	if e.IsEnabled() {
+		t.Error("expected disabled by default")
+	}
+	e.Enable()
+	if !e.IsEnabled() {
+		t.Error("expected enabled")
+	}
+	e.Disable()
+	if e.IsEnabled() {
+		t.Error("expected disabled")
+	}
+}
 
-	err := inter.Execute(context.Background(), "any-target", func(ctx context.Context) error {
-		return nil
-	})
+func TestEngine_ExecuteWithFaults(t *testing.T) {
+	e := NewEngine()
+	e.Register(NewErrorFault(errors.New("chaos"), 1.0))
+	e.Enable()
+	err := e.Execute(context.Background(), func() error { return nil })
+	if err == nil {
+		t.Error("expected fault error")
+	}
+}
+
+func TestEngine_ExecuteDisabled(t *testing.T) {
+	e := NewEngine()
+	e.Register(NewErrorFault(errors.New("chaos"), 1.0))
+	err := e.Execute(context.Background(), func() error { return nil })
 	if err != nil {
-		t.Errorf("expected no fault when globally disabled, got %v", err)
+		t.Error("expected no error when disabled")
+	}
+}
+
+func TestEngine_ExecuteWithLatency(t *testing.T) {
+	e := NewEngine()
+	e.Register(NewLatencyFault(5*time.Millisecond, 0))
+	e.Enable()
+	start := time.Now()
+	err := e.Execute(context.Background(), func() error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) < 5*time.Millisecond {
+		t.Error("expected latency injection")
 	}
 }

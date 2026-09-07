@@ -1,77 +1,77 @@
 package crypto
 
 import (
-	"bytes"
-	"crypto/rand"
 	"testing"
 )
 
-func TestCrypto_EncryptDecryptRoundTrip(t *testing.T) {
-	key := make([]byte, 32)
-	_, _ = rand.Read(key)
-
-	plaintext := []byte("confidential-workflow-token-12345")
-
-	ciphertext, err := Encrypt(key, plaintext)
+func TestAESEncryptDecrypt(t *testing.T) {
+	key, _ := GenerateAESKey()
+	plaintext := []byte("hello world")
+	ciphertext, err := AESEncrypt(key, plaintext)
 	if err != nil {
-		t.Fatalf("failed to encrypt: %v", err)
+		t.Fatal(err)
 	}
-
-	if bytes.Equal(plaintext, ciphertext) {
-		t.Errorf("ciphertext should not match plaintext")
-	}
-
-	decrypted, err := Decrypt(key, ciphertext)
+	decrypted, err := AESDecrypt(key, ciphertext)
 	if err != nil {
-		t.Fatalf("failed to decrypt: %v", err)
+		t.Fatal(err)
 	}
-
-	if !bytes.Equal(plaintext, decrypted) {
-		t.Errorf("expected %s, got %s", plaintext, decrypted)
+	if string(decrypted) != string(plaintext) {
+		t.Error("decryption failed")
 	}
 }
 
-func TestCrypto_TamperedCiphertext(t *testing.T) {
-	key := make([]byte, 32)
-	_, _ = rand.Read(key)
+func TestAESDecryptWrongKey(t *testing.T) {
+	key1, _ := GenerateAESKey()
+	key2, _ := GenerateAESKey()
+	ciphertext, _ := AESEncrypt(key1, []byte("test"))
+	_, err := AESDecrypt(key2, ciphertext)
+	if err == nil {
+		t.Error("expected error with wrong key")
+	}
+}
 
-	plaintext := []byte("tamper-test")
-	ciphertext, err := Encrypt(key, plaintext)
+func TestRSAEncryptDecrypt(t *testing.T) {
+	priv, _ := GenerateRSAKeyPair(2048)
+	plaintext := []byte("secret message")
+	ciphertext, err := RSAEncrypt(&priv.PublicKey, plaintext)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatal(err)
 	}
-
-	// Tamper with ciphertext
-	ciphertext[len(ciphertext)-1] ^= 0xFF
-
-	_, err = Decrypt(key, ciphertext)
-	if err != ErrDecryptionFailed {
-		t.Errorf("expected ErrDecryptionFailed on tampered ciphertext, got %v", err)
+	decrypted, err := RSADecrypt(priv, ciphertext)
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestCrypto_InvalidKeyLength(t *testing.T) {
-	shortKey := []byte("short-key")
-	_, err := Encrypt(shortKey, []byte("data"))
-	if err != ErrInvalidKeyLength {
-		t.Errorf("expected ErrInvalidKeyLength, got %v", err)
-	}
-
-	_, err = Decrypt(shortKey, []byte("data"))
-	if err != ErrInvalidKeyLength {
-		t.Errorf("expected ErrInvalidKeyLength, got %v", err)
+	if string(decrypted) != string(plaintext) {
+		t.Error("decryption failed")
 	}
 }
 
-func TestCrypto_ConstantTimeCompare(t *testing.T) {
-	a := []byte("secure-token-1")
-	b := []byte("secure-token-1")
-	c := []byte("secure-token-2")
-
-	if !ConstantTimeCompare(a, b) {
-		t.Errorf("expected identical slices to match")
+func TestKeyEncoding(t *testing.T) {
+	priv, _ := GenerateRSAKeyPair(2048)
+	pemPriv := EncodePrivateKey(priv)
+	decoded, err := DecodePrivateKey(pemPriv)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if ConstantTimeCompare(a, c) {
-		t.Errorf("expected different slices not to match")
+	if decoded.N.Cmp(priv.N) != 0 {
+		t.Error("private key mismatch")
+	}
+	pemPub := EncodePublicKey(&priv.PublicKey)
+	decodedPub, err := DecodePublicKey(pemPub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decodedPub.N.Cmp(priv.N) != 0 {
+		t.Error("public key mismatch")
+	}
+}
+
+func TestHash(t *testing.T) {
+	h := Hash([]byte("test"))
+	if len(h) != 64 {
+		t.Errorf("expected 64 chars, got %d", len(h))
+	}
+	if h != Hash([]byte("test")) {
+		t.Error("hash not deterministic")
 	}
 }
