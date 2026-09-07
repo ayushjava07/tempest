@@ -7,8 +7,8 @@ Author: Ayushjava07 <ayushjhasahab07@gmail.com>
 | Batch | Description | Starting Count | Ending Count | Verification Status |
 |---|---|---|---|---|
 | Historical | Foundation through Subsystems | 0 | 86 | PASS |
-| Batch 1 | Distributed Leader Election (`internal/leader`) | 86 | Pending | Pending |
-| Batch 2 | Persistent Memory-Mapped Ring Buffer (`internal/mmapring`) | Pending | Pending | Pending |
+| Batch 1 | Distributed Leader Election (`internal/leader`) | 86 | 94 | PASS |
+| Batch 2 | Persistent Memory-Mapped Ring Buffer (`internal/mmapring`) | 94 | Pending | Pending |
 | Batch 3 | Workflow State Archiver (`internal/archiver`) | Pending | Pending | Pending |
 | Batch 4 | Dynamic Replay & Determinism (`internal/replay`) | Pending | Pending | Pending |
 | Batch 5 | Workflow Static Analyzer (`internal/analyzer`) | Pending | Pending | Pending |
