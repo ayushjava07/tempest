@@ -141,6 +141,12 @@ func (c *Candidate) State() State {
 	return c.state
 }
 
+// IsLeader returns whether the candidate currently holds active leadership.
+// It uses an atomic fast-path to eliminate lock contention on high-frequency checks.
+func (c *Candidate) IsLeader() bool {
+	return c.isLeader.Load()
+}
+
 // Term returns the current fencing term.
 func (c *Candidate) Term() uint64 {
 	c.mu.RLock()

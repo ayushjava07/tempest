@@ -214,3 +214,18 @@ func TestLeader_GoleakAndConcurrency(t *testing.T) {
 
 	wg.Wait()
 }
+
+func BenchmarkCandidate_IsLeader(b *testing.B) {
+	coord := NewInMemCoordinator()
+	c := NewCandidate("bench-node", coord, DefaultConfig())
+	_, _ = c.Campaign()
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			if !c.IsLeader() {
+				b.Fatal("expected leader")
+			}
+		}
+	})
+}
