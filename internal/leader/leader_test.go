@@ -78,3 +78,73 @@ func TestLeader_HeartbeatRenewal(t *testing.T) {
 
 	c1.Stop()
 }
+
+func TestLeader_StepDownAndSuccessorTakeover(t *testing.T) {
+	coord := NewInMemCoordinator()
+	cfg := Config{
+		LeaseDuration: 50 * time.Millisecond,
+		RenewInterval: 15 * time.Millisecond,
+		RetryInterval: 15 * time.Millisecond,
+	}
+
+	ctx := context.Background()
+
+	c1 := NewCandidate("node-primary", coord, cfg)
+	c2 := NewCandidate("node-standby", coord, cfg)
+
+	c1.Start(ctx)
+	time.Sleep(30 * time.Millisecond)
+
+	if c1.State() != StateLeader {
+		t.Fatalf("primary should be leader")
+	}
+
+	c2.Start(ctx)
+	time.Sleep(20 * time.Millisecond)
+	if c2.State() != StateFollower {
+		t.Fatalf("standby should be follower while primary is healthy")
+	}
+
+	// Primary steps down
+	c1.Stop()
+	time.Sleep(50 * time.Millisecond)
+
+	// Standby should detect vacancy and take over
+	if c2.State() != StateLeader {
+		t.Fatalf("standby should take over leadership after primary steps down")
+	}
+
+	// Term must advance
+	if c2.Term() <= c1.Term() {
+		t.Fatalf("expected successor term (%d) to be higher than previous (%d)", c2.Term(), c1.Term())
+	}
+
+	c2.Stop()
+}
+
+func TestLeader_ContextCancellation(t *testing.T) {
+	coord := NewInMemCoordinator()
+	cfg := Config{
+		LeaseDuration: 50 * time.Millisecond,
+		RenewInterval: 15 * time.Millisecond,
+		RetryInterval: 15 * time.Millisecond,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	c := NewCandidate("ctx-node", coord, cfg)
+	c.Start(ctx)
+	time.Sleep(25 * time.Millisecond)
+
+	if c.State() != StateLeader {
+		t.Fatalf("expected ctx-node to become leader")
+	}
+
+	// Cancel context -> should step down
+	cancel()
+	time.Sleep(30 * time.Millisecond)
+
+	if c.State() != StateFollower {
+		t.Fatalf("expected ctx-node to step down to follower after context cancel, got %s", c.State())
+	}
+}
