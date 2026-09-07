@@ -115,3 +115,36 @@ func TestArchiver_Index(t *testing.T) {
 		t.Fatalf("deserialized index length mismatch")
 	}
 }
+
+func TestArchiver_TamperedManifestRejection(t *testing.T) {
+	records := sampleRecords(5)
+	exporter := NewExporter()
+	var buf bytes.Buffer
+	manifest, _ := exporter.Export(records, CodecNone, &buf)
+
+	// Tamper payload byte
+	corrupted := buf.Bytes()
+	corrupted[len(corrupted)-1] ^= 0xFF
+
+	unpacker := NewUnpacker()
+	_, err := unpacker.Unpack(bytes.NewReader(corrupted), manifest)
+	if err != ErrChecksumMismatch {
+		t.Fatalf("expected ErrChecksumMismatch, got: %v", err)
+	}
+}
+
+func TestArchiver_TruncatedStreamRejection(t *testing.T) {
+	records := sampleRecords(10)
+	exporter := NewExporter()
+	var buf bytes.Buffer
+	manifest, _ := exporter.Export(records, CodecGzip, &buf)
+
+	// Truncate to first 30 bytes
+	truncated := buf.Bytes()[:30]
+
+	unpacker := NewUnpacker()
+	_, err := unpacker.Unpack(bytes.NewReader(truncated), manifest)
+	if err == nil {
+		t.Fatalf("expected error on truncated archive stream, got nil")
+	}
+}
