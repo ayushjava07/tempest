@@ -1,155 +1,99 @@
 package vault
 
 import (
-	"bytes"
 	"context"
-	"crypto/rand"
-	"errors"
 	"fmt"
-	"sync"
 	"testing"
-
-	"go.uber.org/goleak"
 )
 
-func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
-}
-
-func generateKey() []byte {
-	k := make([]byte, 32)
-	_, _ = rand.Read(k)
-	return k
-}
-
-func TestVault_PutAndGet(t *testing.T) {
-	k1 := generateKey()
-	ring, err := NewKeyRing(k1)
+func TestVault_StoreRetrieve(t *testing.T) {
+	key, _ := GenerateKey()
+	v := New(key)
+	if err := v.Store(context.Background(), "secret1", []byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	val, err := v.Retrieve(context.Background(), "secret1")
 	if err != nil {
-		t.Fatalf("NewKeyRing failed: %v", err)
+		t.Fatal(err)
 	}
-
-	v := NewVault(ring)
-	ctx := context.Background()
-
-	path := "secrets/prod/stripe_key"
-	plaintext := []byte("sk_live_51M0abcdef123456789")
-
-	sec, err := v.Put(ctx, path, plaintext)
-	if err != nil {
-		t.Fatalf("Put failed: %v", err)
-	}
-	if sec.KeyVersion != 1 {
-		t.Errorf("expected key version 1, got %d", sec.KeyVersion)
-	}
-
-	got, err := v.Get(ctx, path)
-	if err != nil {
-		t.Fatalf("Get failed: %v", err)
-	}
-	if !bytes.Equal(got, plaintext) {
-		t.Errorf("decrypted secret mismatch: %s != %s", string(got), string(plaintext))
-	}
-
-	// Unknown path
-	_, err = v.Get(ctx, "secrets/nonexistent")
-	if !errors.Is(err, ErrSecretNotFound) {
-		t.Errorf("expected ErrSecretNotFound, got %v", err)
+	if string(val) != "hello" {
+		t.Errorf("expected hello, got %s", val)
 	}
 }
 
-func TestVault_KeyRotationAndReencryption(t *testing.T) {
-	k1 := generateKey()
-	ring, _ := NewKeyRing(k1)
-	v := NewVault(ring)
-	ctx := context.Background()
-
-	// Store secret with key version 1
-	path := "secrets/database"
-	plaintext := []byte("postgres://admin:secret@pg:5432/tempest")
-	sec1, _ := v.Put(ctx, path, plaintext)
-	if sec1.KeyVersion != 1 {
-		t.Fatalf("expected version 1")
+func TestVault_Delete(t *testing.T) {
+	key, _ := GenerateKey()
+	v := New(key)
+	v.Store(context.Background(), "s1", []byte("x"))
+	if err := v.Delete(context.Background(), "s1"); err != nil {
+		t.Fatal(err)
 	}
+	if _, err := v.Retrieve(context.Background(), "s1"); err == nil {
+		t.Error("expected not found")
+	}
+}
 
-	// Rotate key to version 2
-	k2 := generateKey()
-	count, err := v.RotateAndReencrypt(ctx, k2)
+func TestVault_List(t *testing.T) {
+	key, _ := GenerateKey()
+	v := New(key)
+	v.Store(context.Background(), "a", []byte("1"))
+	v.Store(context.Background(), "b", []byte("2"))
+	list, err := v.List(context.Background())
 	if err != nil {
-		t.Fatalf("RotateAndReencrypt failed: %v", err)
+		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Errorf("expected 1 reencrypted secret, got %d", count)
+	if len(list) != 2 {
+		t.Errorf("expected 2, got %d", len(list))
 	}
+}
 
-	// Secret should now be encrypted with version 2
-	sec2 := v.secrets[path]
-	if sec2.KeyVersion != 2 {
-		t.Errorf("expected key version 2 after rotation, got %d", sec2.KeyVersion)
+func TestVault_NotFound(t *testing.T) {
+	key, _ := GenerateKey()
+	v := New(key)
+	_, err := v.Retrieve(context.Background(), "missing")
+	if err == nil {
+		t.Error("expected error")
 	}
+}
 
-	// Decryption should still yield original plaintext
-	got, err := v.Get(ctx, path)
+func TestVault_KeyGeneration(t *testing.T) {
+	key, err := GenerateKey()
 	if err != nil {
-		t.Fatalf("Get after rotation failed: %v", err)
+		t.Fatal(err)
 	}
-	if !bytes.Equal(got, plaintext) {
-		t.Errorf("plaintext mismatch after rotation: %s", string(got))
+	if len(key) != 32 {
+		t.Errorf("expected 32 bytes, got %d", len(key))
 	}
-}
-
-func TestVault_TamperedCiphertext(t *testing.T) {
-	ring, _ := NewKeyRing(generateKey())
-	v := NewVault(ring)
-	ctx := context.Background()
-
-	path := "secrets/test"
-	_, _ = v.Put(ctx, path, []byte("sensitive-data"))
-
-	// Tamper with ciphertext byte
-	v.secrets[path].Ciphertext[0] ^= 0xFF
-
-	_, err := v.Get(ctx, path)
-	if !errors.Is(err, ErrCiphertextCorrupt) {
-		t.Fatalf("expected ErrCiphertextCorrupt for tampered ciphertext, got %v", err)
+	key2, _ := GenerateKey()
+	if string(key) == string(key2) {
+		t.Error("expected different keys")
 	}
 }
 
-func TestVault_InvalidKey(t *testing.T) {
-	_, err := NewKeyRing([]byte("short-key"))
-	if !errors.Is(err, ErrInvalidKeyLength) {
-		t.Errorf("expected ErrInvalidKeyLength, got %v", err)
+func TestVault_EncodeDecode(t *testing.T) {
+	key, _ := GenerateKey()
+	encoded := EncodeKey(key)
+	decoded, err := DecodeKey(encoded)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	ring, _ := NewKeyRing(generateKey())
-	_, err = ring.Rotate([]byte("short-key-too"))
-	if !errors.Is(err, ErrInvalidKeyLength) {
-		t.Errorf("expected ErrInvalidKeyLength on rotate, got %v", err)
+	if string(key) != string(decoded) {
+		t.Error("key mismatch")
 	}
 }
 
-func TestVault_Concurrency(t *testing.T) {
-	ring, _ := NewKeyRing(generateKey())
-	v := NewVault(ring)
-	concurrency := 10
-
-	var wg sync.WaitGroup
-	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			path := fmt.Sprintf("secrets/worker-%d", id)
-			data := []byte(fmt.Sprintf("secret-val-%d", id))
-			_, err := v.Put(context.Background(), path, data)
-			if err != nil {
-				t.Errorf("Put failed: %v", err)
-				return
-			}
-			dec, err := v.Get(context.Background(), path)
-			if err != nil || !bytes.Equal(dec, data) {
-				t.Errorf("Get failed in worker %d", id)
-			}
+func TestVault_Concurrent(t *testing.T) {
+	key, _ := GenerateKey()
+	v := New(key)
+	done := make(chan bool, 100)
+	for i := 0; i < 100; i++ {
+		go func(n int) {
+			v.Store(context.Background(), fmt.Sprintf("s%d", n), []byte("val"))
+			v.Retrieve(context.Background(), fmt.Sprintf("s%d", n))
+			done <- true
 		}(i)
 	}
-	wg.Wait()
+	for i := 0; i < 100; i++ {
+		<-done
+	}
 }

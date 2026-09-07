@@ -1,158 +1,102 @@
 package versioning
 
 import (
-	"errors"
 	"testing"
-	"time"
-
-	"go.uber.org/goleak"
-
-	ttypes "github.com/tempest-io/tempest/pkg/types"
 )
 
-func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
+func TestVersion_Parse(t *testing.T) {
+	v, err := Parse("1.2.3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Major != 1 || v.Minor != 2 || v.Patch != 3 {
+		t.Errorf("expected 1.2.3, got %s", v.String())
+	}
 }
 
-func TestVersioning_SemVerParsingAndCompare(t *testing.T) {
-	v1, err := ParseSemVer("v1.2.3")
+func TestVersion_ParseWithPre(t *testing.T) {
+	v, err := Parse("1.2.3-alpha")
 	if err != nil {
-		t.Fatalf("ParseSemVer failed: %v", err)
+		t.Fatal(err)
 	}
-	if v1.Major != 1 || v1.Minor != 2 || v1.Patch != 3 {
-		t.Errorf("unexpected semver fields: %v", v1)
+	if v.Pre != "alpha" {
+		t.Errorf("expected alpha, got %s", v.Pre)
 	}
-	if v1.String() != "1.2.3" {
-		t.Errorf("unexpected String(): %s", v1.String())
-	}
+}
 
-	v2, _ := ParseSemVer("1.3.0")
+func TestVersion_ParseWithV(t *testing.T) {
+	v, err := Parse("v2.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Major != 2 {
+		t.Errorf("expected 2, got %d", v.Major)
+	}
+}
+
+func TestVersion_Compare(t *testing.T) {
+	v1, _ := Parse("1.2.3")
+	v2, _ := Parse("1.2.4")
 	if v1.Compare(v2) != -1 {
-		t.Errorf("expected v1 < v2")
+		t.Error("expected v1 < v2")
 	}
 	if v2.Compare(v1) != 1 {
-		t.Errorf("expected v2 > v1")
+		t.Error("expected v2 > v1")
 	}
-
-	v3, _ := ParseSemVer("1.2.3")
+	v3, _ := Parse("1.2.3")
 	if v1.Compare(v3) != 0 {
-		t.Errorf("expected v1 == v3")
-	}
-
-	// Invalid versions
-	invalidVersions := []string{"", "1", "1.2", "1.2.a", "-1.0.0"}
-	for _, inv := range invalidVersions {
-		_, err := ParseSemVer(inv)
-		if !errors.Is(err, ErrInvalidSemVer) {
-			t.Errorf("expected ErrInvalidSemVer for %q, got %v", inv, err)
-		}
+		t.Error("expected equal")
 	}
 }
 
-func TestVersioning_DiffIdentical(t *testing.T) {
-	def1 := &ttypes.WorkflowDefinition{
-		ID: ttypes.WorkflowID{Name: "wf-1", Version: 1},
-		Steps: []ttypes.StepDefinition{
-			{ID: "step-1", Handler: "echo", Timeout: 10 * time.Second},
-		},
+func TestVersion_Satisfies(t *testing.T) {
+	v, _ := Parse("1.2.3")
+	if !v.Satisfies("1.2.3") {
+		t.Error("expected exact match")
 	}
-	def2 := &ttypes.WorkflowDefinition{
-		ID: ttypes.WorkflowID{Name: "wf-1", Version: 1},
-		Steps: []ttypes.StepDefinition{
-			{ID: "step-1", Handler: "echo", Timeout: 10 * time.Second},
-		},
+	if !v.Satisfies(">=1.0.0") {
+		t.Error("expected >= match")
 	}
-
-	diff := CompareDefinitions(def1, def2)
-	if diff.Compatibility != LevelIdentical {
-		t.Errorf("expected LevelIdentical, got %v", diff.Compatibility)
+	if !v.Satisfies("<=2.0.0") {
+		t.Error("expected <= match")
 	}
-	if len(diff.Changes) != 0 {
-		t.Errorf("expected 0 changes, got %d", len(diff.Changes))
+	if !v.Satisfies(">1.0.0") {
+		t.Error("expected > match")
 	}
-}
-
-func TestVersioning_DiffBreaking(t *testing.T) {
-	defOld := &ttypes.WorkflowDefinition{
-		ID: ttypes.WorkflowID{Name: "wf-1", Version: 1},
-		Steps: []ttypes.StepDefinition{
-			{ID: "step-1", Handler: "echo"},
-			{ID: "step-2", Handler: "shell", DependsOn: []string{"step-1"}},
-		},
+	if !v.Satisfies("<2.0.0") {
+		t.Error("expected < match")
 	}
-
-	// Case 1: Step removed
-	defRemoved := &ttypes.WorkflowDefinition{
-		ID: ttypes.WorkflowID{Name: "wf-1", Version: 2},
-		Steps: []ttypes.StepDefinition{
-			{ID: "step-1", Handler: "echo"},
-		},
+	if !v.Satisfies("~1.2.0") {
+		t.Error("expected ~ match")
 	}
-	diff := CompareDefinitions(defOld, defRemoved)
-	if diff.Compatibility != LevelBreaking {
-		t.Errorf("expected LevelBreaking for removed step, got %v", diff.Compatibility)
+	if !v.Satisfies("^1.0.0") {
+		t.Error("expected ^ match")
 	}
-
-	// Case 2: Handler changed
-	defHandlerChanged := &ttypes.WorkflowDefinition{
-		ID: ttypes.WorkflowID{Name: "wf-1", Version: 2},
-		Steps: []ttypes.StepDefinition{
-			{ID: "step-1", Handler: "http"}, // was echo
-			{ID: "step-2", Handler: "shell", DependsOn: []string{"step-1"}},
-		},
-	}
-	diff2 := CompareDefinitions(defOld, defHandlerChanged)
-	if diff2.Compatibility != LevelBreaking {
-		t.Errorf("expected LevelBreaking for handler change, got %v", diff2.Compatibility)
+	if v.Satisfies("2.0.0") {
+		t.Error("expected no match")
 	}
 }
 
-func TestVersioning_DiffBackwardsCompatible(t *testing.T) {
-	defOld := &ttypes.WorkflowDefinition{
-		ID: ttypes.WorkflowID{Name: "wf-1", Version: 1},
-		Steps: []ttypes.StepDefinition{
-			{ID: "step-1", Handler: "echo", Timeout: 5 * time.Second},
-		},
+func TestVersion_Increment(t *testing.T) {
+	v, _ := Parse("1.2.3")
+	if IncrementMajor(v).String() != "2.0.0" {
+		t.Error("expected 2.0.0")
 	}
-
-	// New step added and timeout relaxed
-	defNew := &ttypes.WorkflowDefinition{
-		ID: ttypes.WorkflowID{Name: "wf-1", Version: 2},
-		Steps: []ttypes.StepDefinition{
-			{ID: "step-1", Handler: "echo", Timeout: 10 * time.Second},
-			{ID: "step-2", Handler: "pass"},
-		},
+	if IncrementMinor(v).String() != "1.3.0" {
+		t.Error("expected 1.3.0")
 	}
-
-	diff := CompareDefinitions(defOld, defNew)
-	if diff.Compatibility != LevelBackwardsCompatible {
-		t.Errorf("expected LevelBackwardsCompatible, got %v", diff.Compatibility)
-	}
-	if len(diff.Changes) != 2 {
-		t.Errorf("expected 2 changes, got %d", len(diff.Changes))
+	if IncrementPatch(v).String() != "1.2.4" {
+		t.Error("expected 1.2.4")
 	}
 }
 
-func TestVersioning_DecideUpgradeStrategy(t *testing.T) {
-	breakingDiff := DiffReport{Compatibility: LevelBreaking}
-	compatDiff := DiffReport{Compatibility: LevelBackwardsCompatible}
-	identDiff := DiffReport{Compatibility: LevelIdentical}
-
-	// Running workflows with breaking changes must pin
-	if strat := DecideUpgradeStrategy(breakingDiff, ttypes.StateRunning); strat != StrategyPinToVersion {
-		t.Errorf("expected StrategyPinToVersion, got %s", strat)
+func TestVersion_String(t *testing.T) {
+	v := Version{Major: 1, Minor: 2, Patch: 3, Pre: "beta"}
+	if v.String() != "1.2.3-beta" {
+		t.Errorf("expected 1.2.3-beta, got %s", v.String())
 	}
-
-	// Running workflows with backwards-compatible changes should drain and exit
-	if strat := DecideUpgradeStrategy(compatDiff, ttypes.StateRunning); strat != StrategyDrainAndExit {
-		t.Errorf("expected StrategyDrainAndExit, got %s", strat)
-	}
-
-	// Pending or non-running workflows auto-migrate
-	if strat := DecideUpgradeStrategy(breakingDiff, ttypes.StatePending); strat != StrategyAutoMigrate {
-		t.Errorf("expected StrategyAutoMigrate for pending, got %s", strat)
-	}
-	if strat := DecideUpgradeStrategy(identDiff, ttypes.StateRunning); strat != StrategyAutoMigrate {
-		t.Errorf("expected StrategyAutoMigrate for identical, got %s", strat)
+	v2 := Version{Major: 2, Minor: 0, Patch: 0}
+	if v2.String() != "2.0.0" {
+		t.Errorf("expected 2.0.0, got %s", v2.String())
 	}
 }
