@@ -6,8 +6,8 @@ import (
 
 func adminCmd() *Command {
 	return &Command{
-		Name:     "admin",
-		Summary:  "administrative operations",
+		Name:    "admin",
+		Summary: "administrative operations",
 		Children: []*Command{
 			adminTokenCmd(),
 			adminQueueCmd(),

@@ -9,8 +9,8 @@ import (
 
 func configCmd() *Command {
 	return &Command{
-		Name:     "config",
-		Summary:  "manage configuration",
+		Name:    "config",
+		Summary: "manage configuration",
 		Children: []*Command{
 			configShowCmd(),
 			configValidateCmd(),

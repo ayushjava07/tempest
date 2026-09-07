@@ -8,8 +8,8 @@ import (
 
 func runCmd() *Command {
 	return &Command{
-		Name:     "runs",
-		Summary:  "manage workflow runs",
+		Name:    "runs",
+		Summary: "manage workflow runs",
 		Children: []*Command{
 			runListCmd(),
 			runGetCmd(),
