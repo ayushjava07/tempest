@@ -2,126 +2,131 @@ package lease
 
 import (
 	"context"
-	"errors"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
-var (
-	ErrLeaseHeld        = errors.New("lease is currently held by another owner")
-	ErrLeaseExpired     = errors.New("lease has expired")
-	ErrNotLeaseHolder   = errors.New("caller is not the active lease holder")
-	ErrFencingStale     = errors.New("fencing token is stale")
-)
-
-// Lease represents a distributed coordination lease with an epoch/fencing token.
 type Lease struct {
-	ResourceID   string
-	Owner        string
-	FencingToken int64
-	ExpiresAt    time.Time
+	ID        string
+	Holder    string
+	Resource  string
+	ExpiresAt time.Time
 }
 
-// Coordinator manages distributed leases in-memory with monotonic fencing tokens.
-type Coordinator struct {
-	mu           sync.RWMutex
-	leases       map[string]*Lease
-	tokenCounter atomic.Int64
+type Manager struct {
+	mu      sync.RWMutex
+	leases  map[string]*Lease
+	tokenFn func() string
 }
 
-// NewCoordinator creates a new Lease Coordinator.
-func NewCoordinator() *Coordinator {
-	return &Coordinator{
-		leases: make(map[string]*Lease),
+func NewManager(tokenFn func() string) *Manager {
+	if tokenFn == nil {
+		tokenFn = func() string { return "" }
+	}
+	return &Manager{
+		leases:  make(map[string]*Lease),
+		tokenFn: tokenFn,
 	}
 }
 
-// Acquire attempts to acquire or re-acquire a lease for resourceID.
-// If the lease is held and not expired by a different owner, ErrLeaseHeld is returned.
-func (c *Coordinator) Acquire(ctx context.Context, resourceID, owner string, ttl time.Duration) (*Lease, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	now := time.Now()
-	existing, exists := c.leases[resourceID]
-
-	if exists && existing.ExpiresAt.After(now) && existing.Owner != owner {
-		return nil, ErrLeaseHeld
+func (m *Manager) Acquire(ctx context.Context, holder, resource string, ttl time.Duration) (*Lease, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if existing, ok := m.leases[resource]; ok {
+		if time.Now().Before(existing.ExpiresAt) && existing.Holder != holder {
+			return nil, &LeaseConflictError{Resource: resource, Holder: existing.Holder}
+		}
 	}
-
-	token := c.tokenCounter.Add(1)
-	l := &Lease{
-		ResourceID:   resourceID,
-		Owner:        owner,
-		FencingToken: token,
-		ExpiresAt:    now.Add(ttl),
+	lease := &Lease{
+		ID:        m.tokenFn(),
+		Holder:    holder,
+		Resource:  resource,
+		ExpiresAt: time.Now().Add(ttl),
 	}
-
-	c.leases[resourceID] = l
-	return l, nil
+	m.leases[resource] = lease
+	return lease, nil
 }
 
-// Renew extends the TTL of an actively held lease, validating the owner and fencing token.
-func (c *Coordinator) Renew(ctx context.Context, resourceID, owner string, token int64, ttl time.Duration) (*Lease, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	now := time.Now()
-	existing, exists := c.leases[resourceID]
-	if !exists {
-		return nil, ErrLeaseExpired
+func (m *Manager) Renew(ctx context.Context, holder, resource string, ttl time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lease, ok := m.leases[resource]
+	if !ok {
+		return &LeaseNotFoundError{Resource: resource}
 	}
-
-	if existing.Owner != owner {
-		return nil, ErrNotLeaseHolder
+	if lease.Holder != holder {
+		return &LeaseConflictError{Resource: resource, Holder: lease.Holder}
 	}
-
-	if existing.FencingToken != token {
-		return nil, ErrFencingStale
-	}
-
-	if now.After(existing.ExpiresAt) {
-		return nil, ErrLeaseExpired
-	}
-
-	existing.ExpiresAt = now.Add(ttl)
-	return existing, nil
-}
-
-// Release yields a lease if the caller is the current holder with matching fencing token.
-func (c *Coordinator) Release(ctx context.Context, resourceID, owner string, token int64) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	existing, exists := c.leases[resourceID]
-	if !exists {
-		return nil
-	}
-
-	if existing.Owner != owner {
-		return ErrNotLeaseHolder
-	}
-
-	if existing.FencingToken != token {
-		return ErrFencingStale
-	}
-
-	delete(c.leases, resourceID)
+	lease.ExpiresAt = time.Now().Add(ttl)
 	return nil
 }
 
-// Validate checks if the lease is still valid for the given owner and token.
-func (c *Coordinator) Validate(resourceID, owner string, token int64) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	existing, exists := c.leases[resourceID]
-	if !exists {
-		return false
+func (m *Manager) Release(ctx context.Context, holder, resource string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lease, ok := m.leases[resource]
+	if !ok {
+		return &LeaseNotFoundError{Resource: resource}
 	}
+	if lease.Holder != holder {
+		return &LeaseConflictError{Resource: resource, Holder: lease.Holder}
+	}
+	delete(m.leases, resource)
+	return nil
+}
 
-	return existing.Owner == owner &&
-		existing.FencingToken == token &&
-		time.Now().Before(existing.ExpiresAt)
+func (m *Manager) Get(resource string) (*Lease, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	lease, ok := m.leases[resource]
+	if !ok {
+		return nil, false
+	}
+	if time.Now().After(lease.ExpiresAt) {
+		return nil, false
+	}
+	return lease, true
+}
+
+func (m *Manager) Expired() []*Lease {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	var expired []*Lease
+	for resource, lease := range m.leases {
+		if now.After(lease.ExpiresAt) {
+			expired = append(expired, lease)
+			delete(m.leases, resource)
+		}
+	}
+	return expired
+}
+
+func (m *Manager) All() []*Lease {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var result []*Lease
+	for _, lease := range m.leases {
+		if time.Now().Before(lease.ExpiresAt) {
+			result = append(result, lease)
+		}
+	}
+	return result
+}
+
+type LeaseNotFoundError struct {
+	Resource string
+}
+
+func (e *LeaseNotFoundError) Error() string {
+	return "lease not found: " + e.Resource
+}
+
+type LeaseConflictError struct {
+	Resource string
+	Holder   string
+}
+
+func (e *LeaseConflictError) Error() string {
+	return "lease conflict: " + e.Resource + " held by " + e.Holder
 }

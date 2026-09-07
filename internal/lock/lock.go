@@ -2,266 +2,207 @@ package lock
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"sync"
-	"sync/atomic"
-	"time"
 )
 
-var (
-	ErrLockAcquisitionTimeout = errors.New("lock: acquisition timeout exceeded")
-	ErrLockHeld               = errors.New("lock: already held by another owner")
-	ErrLockNotHeld            = errors.New("lock: not held by specified owner")
-	ErrDeadlockDetected       = errors.New("lock: deadlock detected in wait-for graph")
-	ErrInvalidLease           = errors.New("lock: lease duration must be positive")
-)
-
-// LockMode designates shared read vs exclusive write lock semantics.
-type LockMode string
-
-const (
-	ModeShared    LockMode = "SHARED"
-	ModeExclusive LockMode = "EXCLUSIVE"
-)
-
-// Lease encapsulates an acquired lock with a monotonic fencing token.
-type Lease struct {
-	Resource     string
-	Owner        string
-	Mode         LockMode
-	FencingToken uint64
-	ExpiresAt    time.Time
-	RenewedCount int
+type Lock struct {
+	mu         sync.Mutex
+	holder     string
+	held       bool
+	waiters    []chan struct{}
 }
 
-// Coordinator manages distributed multi-resource locking and deadlock detection.
-type Coordinator struct {
-	mu           sync.Mutex
-	fencingSeq   atomic.Uint64
-	locks        map[string]*resourceLock
-	waitForGraph map[string]map[string]bool // owner -> map of owners it is waiting on
-}
-
-type resourceLock struct {
-	resource       string
-	exclusive      bool
-	exclusiveOwner string
-	sharedOwners   map[string]int
-	fencingToken   uint64
-	expiresAt      time.Time
-}
-
-func NewCoordinator() *Coordinator {
-	return &Coordinator{
-		locks:        make(map[string]*resourceLock),
-		waitForGraph: make(map[string]map[string]bool),
+func New() *Lock {
+	return &Lock{
+		waiters: make([]chan struct{}, 0),
 	}
 }
 
-// Acquire attempts to acquire the named lock, performing deadlock detection if waiting.
-func (c *Coordinator) Acquire(ctx context.Context, resource, owner string, mode LockMode, ttl time.Duration) (*Lease, error) {
-	if ttl <= 0 {
-		return nil, ErrInvalidLease
+func (l *Lock) Lock(ctx context.Context) error {
+	l.mu.Lock()
+	if !l.held {
+		l.held = true
+		l.mu.Unlock()
+		return nil
 	}
-
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		c.mu.Lock()
-		resLock, exists := c.locks[resource]
-
-		// Check if expired
-		if exists && time.Now().After(resLock.expiresAt) {
-			delete(c.locks, resource)
-			exists = false
-		}
-
-		canAcquire := false
-		if !exists {
-			canAcquire = true
-		} else if mode == ModeShared && !resLock.exclusive {
-			canAcquire = true
-		} else if mode == ModeExclusive && resLock.exclusive && resLock.exclusiveOwner == owner {
-			// Re-entrant exclusive lock
-			canAcquire = true
-		} else if mode == ModeShared && !resLock.exclusive && resLock.sharedOwners[owner] > 0 {
-			// Re-entrant shared lock
-			canAcquire = true
-		}
-
-		if canAcquire {
-			c.removeWaiter(owner)
-			token := c.fencingSeq.Add(1)
-			expiresAt := time.Now().Add(ttl)
-
-			if !exists {
-				resLock = &resourceLock{
-					resource:     resource,
-					sharedOwners: make(map[string]int),
-				}
-				c.locks[resource] = resLock
-			}
-
-			resLock.fencingToken = token
-			resLock.expiresAt = expiresAt
-
-			if mode == ModeExclusive {
-				resLock.exclusive = true
-				resLock.exclusiveOwner = owner
-			} else {
-				resLock.sharedOwners[owner]++
-			}
-
-			lease := &Lease{
-				Resource:     resource,
-				Owner:        owner,
-				Mode:         mode,
-				FencingToken: token,
-				ExpiresAt:    expiresAt,
-			}
-			c.mu.Unlock()
-			return lease, nil
-		}
-
-		// Cannot acquire immediately. Update Wait-For Graph (WFG)
-		var currentHolders []string
-		if resLock.exclusive {
-			currentHolders = append(currentHolders, resLock.exclusiveOwner)
-		} else {
-			for holder := range resLock.sharedOwners {
-				currentHolders = append(currentHolders, holder)
+	ch := make(chan struct{}, 1)
+	l.waiters = append(l.waiters, ch)
+	l.mu.Unlock()
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		l.mu.Lock()
+		for i, w := range l.waiters {
+			if w == ch {
+				l.waiters = append(l.waiters[:i], l.waiters[i+1:]...)
+				break
 			}
 		}
-
-		for _, holder := range currentHolders {
-			if holder != owner {
-				c.addWaiter(owner, holder)
-			}
-		}
-
-		// Check for cycle in Wait-For-Graph
-		if c.hasCycle(owner) {
-			c.removeWaiter(owner)
-			c.mu.Unlock()
-			return nil, fmt.Errorf("%w: owner %s caused cycle", ErrDeadlockDetected, owner)
-		}
-
-		c.mu.Unlock()
-
-		select {
-		case <-ctx.Done():
-			c.mu.Lock()
-			c.removeWaiter(owner)
-			c.mu.Unlock()
-			return nil, ctx.Err()
-		case <-ticker.C:
-		}
+		l.mu.Unlock()
+		return ctx.Err()
 	}
 }
 
-// Release relinquishes the lock.
-func (c *Coordinator) Release(resource, owner string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	resLock, ok := c.locks[resource]
-	if !ok {
-		return ErrLockNotHeld
-	}
-
-	if resLock.exclusive {
-		if resLock.exclusiveOwner != owner {
-			return ErrLockNotHeld
-		}
-		delete(c.locks, resource)
-	} else {
-		count := resLock.sharedOwners[owner]
-		if count <= 0 {
-			return ErrLockNotHeld
-		}
-		if count == 1 {
-			delete(resLock.sharedOwners, owner)
-		} else {
-			resLock.sharedOwners[owner]--
-		}
-		if len(resLock.sharedOwners) == 0 {
-			delete(c.locks, resource)
-		}
-	}
-
-	c.removeWaiter(owner)
-	return nil
-}
-
-// Renew extends an active lock's expiration.
-func (c *Coordinator) Renew(resource, owner string, ttl time.Duration) (*Lease, error) {
-	if ttl <= 0 {
-		return nil, ErrInvalidLease
-	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	resLock, ok := c.locks[resource]
-	if !ok || time.Now().After(resLock.expiresAt) {
-		return nil, ErrLockNotHeld
-	}
-
-	if resLock.exclusive && resLock.exclusiveOwner != owner {
-		return nil, ErrLockNotHeld
-	}
-	if !resLock.exclusive && resLock.sharedOwners[owner] <= 0 {
-		return nil, ErrLockNotHeld
-	}
-
-	resLock.expiresAt = time.Now().Add(ttl)
-	return &Lease{
-		Resource:     resource,
-		Owner:        owner,
-		FencingToken: resLock.fencingToken,
-		ExpiresAt:    resLock.expiresAt,
-	}, nil
-}
-
-func (c *Coordinator) addWaiter(waiter, holder string) {
-	if c.waitForGraph[waiter] == nil {
-		c.waitForGraph[waiter] = make(map[string]bool)
-	}
-	c.waitForGraph[waiter][holder] = true
-}
-
-func (c *Coordinator) removeWaiter(waiter string) {
-	delete(c.waitForGraph, waiter)
-	for _, holders := range c.waitForGraph {
-		delete(holders, waiter)
-	}
-}
-
-// hasCycle detects directed cycles in the Wait-For-Graph starting from startNode.
-func (c *Coordinator) hasCycle(startNode string) bool {
-	visited := make(map[string]bool)
-	recStack := make(map[string]bool)
-
-	var dfs func(node string) bool
-	dfs = func(node string) bool {
-		visited[node] = true
-		recStack[node] = true
-
-		for neighbor := range c.waitForGraph[node] {
-			if !visited[neighbor] {
-				if dfs(neighbor) {
-					return true
-				}
-			} else if recStack[neighbor] {
-				return true
-			}
-		}
-
-		recStack[node] = false
+func (l *Lock) TryLock() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.held {
 		return false
 	}
+	l.held = true
+	return true
+}
 
-	return dfs(startNode)
+func (l *Lock) Unlock() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.held {
+		return
+	}
+	if len(l.waiters) > 0 {
+		ch := l.waiters[0]
+		l.waiters = l.waiters[1:]
+		ch <- struct{}{}
+	} else {
+		l.held = false
+	}
+}
+
+func (l *Lock) IsHeld() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.held
+}
+
+func (l *Lock) Waiters() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.waiters)
+}
+
+type RWLock struct {
+	mu           sync.Mutex
+	readers      int
+	writerHeld   bool
+	writerWaiters int
+	readerWaiters []chan struct{}
+	writerQueue  []chan struct{}
+}
+
+func NewRWLock() *RWLock {
+	return &RWLock{
+		readerWaiters: make([]chan struct{}, 0),
+		writerQueue:   make([]chan struct{}, 0),
+	}
+}
+
+func (rw *RWLock) RLock(ctx context.Context) error {
+	rw.mu.Lock()
+	if !rw.writerHeld && rw.writerWaiters == 0 {
+		rw.readers++
+		rw.mu.Unlock()
+		return nil
+	}
+	ch := make(chan struct{}, 1)
+	rw.readerWaiters = append(rw.readerWaiters, ch)
+	rw.mu.Unlock()
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		rw.mu.Lock()
+		for i, w := range rw.readerWaiters {
+			if w == ch {
+				rw.readerWaiters = append(rw.readerWaiters[:i], rw.readerWaiters[i+1:]...)
+				break
+			}
+		}
+		rw.mu.Unlock()
+		return ctx.Err()
+	}
+}
+
+func (rw *RWLock) RUnlock() {
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
+	rw.readers--
+	if rw.readers == 0 && len(rw.writerQueue) > 0 {
+		ch := rw.writerQueue[0]
+		rw.writerQueue = rw.writerQueue[1:]
+		rw.writerHeld = true
+		rw.writerWaiters--
+		ch <- struct{}{}
+	}
+}
+
+func (rw *RWLock) Lock(ctx context.Context) error {
+	rw.mu.Lock()
+	if rw.readers == 0 && !rw.writerHeld {
+		rw.writerHeld = true
+		rw.mu.Unlock()
+		return nil
+	}
+	ch := make(chan struct{}, 1)
+	rw.writerQueue = append(rw.writerQueue, ch)
+	rw.writerWaiters++
+	rw.mu.Unlock()
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		rw.mu.Lock()
+		for i, w := range rw.writerQueue {
+			if w == ch {
+				rw.writerQueue = append(rw.writerQueue[:i], rw.writerQueue[i+1:]...)
+				break
+			}
+		}
+		rw.writerWaiters--
+		rw.mu.Unlock()
+		return ctx.Err()
+	}
+}
+
+func (rw *RWLock) Unlock() {
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
+	if !rw.writerHeld {
+		return
+	}
+	rw.writerHeld = false
+	if len(rw.readerWaiters) > 0 {
+		for len(rw.readerWaiters) > 0 {
+			ch := rw.readerWaiters[0]
+			rw.readerWaiters = rw.readerWaiters[1:]
+			rw.readers++
+			ch <- struct{}{}
+		}
+	} else if len(rw.writerQueue) > 0 {
+		ch := rw.writerQueue[0]
+		rw.writerQueue = rw.writerQueue[1:]
+		rw.writerHeld = true
+		rw.writerWaiters--
+		ch <- struct{}{}
+	}
+}
+
+func (rw *RWLock) TryRLock() bool {
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
+	if rw.writerHeld || rw.writerWaiters > 0 {
+		return false
+	}
+	rw.readers++
+	return true
+}
+
+func (rw *RWLock) TryLock() bool {
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
+	if rw.readers > 0 || rw.writerHeld {
+		return false
+	}
+	rw.writerHeld = true
+	return true
 }

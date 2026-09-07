@@ -38,17 +38,12 @@ func BenchmarkDAG_TopologicalSort_10Nodes(b *testing.B) {
 
 func BenchmarkExpression_EvaluateVariable(b *testing.B) {
 	eval := expression.New()
-	ctx := map[string]interface{}{
-		"step": map[string]interface{}{
-			"status": "success",
-			"code":   200,
-		},
-	}
-	expr := "${step.code} == 200"
+	eval.SetVariable("step.code", 200)
+	expr := "$step.code"
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = eval.Evaluate(expr, ctx)
+		_, _ = eval.Evaluate(expr)
 	}
 }
 

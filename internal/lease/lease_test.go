@@ -7,92 +7,119 @@ import (
 	"time"
 )
 
-func TestCoordinator_AcquireAndRelease(t *testing.T) {
-	c := NewCoordinator()
-	ctx := context.Background()
-
-	l, err := c.Acquire(ctx, "res-1", "worker-a", time.Minute)
+func TestManager_Acquire(t *testing.T) {
+	m := NewManager(func() string { return "token" })
+	l, err := m.Acquire(context.Background(), "holder1", "resource1", time.Second)
 	if err != nil {
-		t.Fatalf("failed to acquire lease: %v", err)
+		t.Fatal(err)
 	}
-
-	if l.FencingToken <= 0 {
-		t.Errorf("expected positive fencing token, got %d", l.FencingToken)
-	}
-
-	if !c.Validate("res-1", "worker-a", l.FencingToken) {
-		t.Errorf("expected lease to be valid")
-	}
-
-	// Worker B cannot acquire
-	_, err = c.Acquire(ctx, "res-1", "worker-b", time.Minute)
-	if err != ErrLeaseHeld {
-		t.Fatalf("expected ErrLeaseHeld, got %v", err)
-	}
-
-	// Worker A releases
-	if err := c.Release(ctx, "res-1", "worker-a", l.FencingToken); err != nil {
-		t.Fatalf("failed to release lease: %v", err)
-	}
-
-	// Worker B can now acquire
-	l2, err := c.Acquire(ctx, "res-1", "worker-b", time.Minute)
-	if err != nil {
-		t.Fatalf("expected worker-b to acquire after release: %v", err)
-	}
-	if l2.FencingToken <= l.FencingToken {
-		t.Errorf("expected monotonic fencing token increase: %d <= %d", l2.FencingToken, l.FencingToken)
+	if l.Holder != "holder1" {
+		t.Error("holder mismatch")
 	}
 }
 
-func TestCoordinator_Renew(t *testing.T) {
-	c := NewCoordinator()
-	ctx := context.Background()
-
-	l, err := c.Acquire(ctx, "res-2", "worker-a", 100*time.Millisecond)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	renewed, err := c.Renew(ctx, "res-2", "worker-a", l.FencingToken, time.Hour)
-	if err != nil {
-		t.Fatalf("failed to renew lease: %v", err)
-	}
-
-	if renewed.ExpiresAt.Before(time.Now().Add(30 * time.Minute)) {
-		t.Errorf("expected lease to be extended by ~1 hour")
-	}
-
-	// Wrong token renewal fails
-	_, err = c.Renew(ctx, "res-2", "worker-a", 999, time.Hour)
-	if err != ErrFencingStale {
-		t.Errorf("expected ErrFencingStale, got %v", err)
+func TestManager_Acquire_Conflict(t *testing.T) {
+	m := NewManager(func() string { return "token" })
+	m.Acquire(context.Background(), "holder1", "resource1", time.Hour)
+	_, err := m.Acquire(context.Background(), "holder2", "resource1", time.Hour)
+	if err == nil {
+		t.Error("expected conflict")
 	}
 }
 
-func TestCoordinator_ConcurrentAcquisition(t *testing.T) {
-	c := NewCoordinator()
-	ctx := context.Background()
+func TestManager_Renew(t *testing.T) {
+	m := NewManager(func() string { return "token" })
+	m.Acquire(context.Background(), "holder1", "resource1", 50*time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
+	if err := m.Renew(context.Background(), "holder1", "resource1", time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
 
+func TestManager_Renew_WrongHolder(t *testing.T) {
+	m := NewManager(func() string { return "token" })
+	m.Acquire(context.Background(), "holder1", "resource1", time.Hour)
+	err := m.Renew(context.Background(), "holder2", "resource1", time.Hour)
+	if err == nil {
+		t.Error("expected conflict")
+	}
+}
+
+func TestManager_Release(t *testing.T) {
+	m := NewManager(func() string { return "token" })
+	m.Acquire(context.Background(), "holder1", "resource1", time.Hour)
+	if err := m.Release(context.Background(), "holder1", "resource1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.Get("resource1"); ok {
+		t.Error("expected released")
+	}
+}
+
+func TestManager_Release_WrongHolder(t *testing.T) {
+	m := NewManager(func() string { return "token" })
+	m.Acquire(context.Background(), "holder1", "resource1", time.Hour)
+	err := m.Release(context.Background(), "holder2", "resource1")
+	if err == nil {
+		t.Error("expected conflict")
+	}
+}
+
+func TestManager_Get(t *testing.T) {
+	m := NewManager(func() string { return "token" })
+	m.Acquire(context.Background(), "holder1", "resource1", time.Hour)
+	l, ok := m.Get("resource1")
+	if !ok || l.Holder != "holder1" {
+		t.Error("expected lease")
+	}
+}
+
+func TestManager_Get_Expired(t *testing.T) {
+	m := NewManager(func() string { return "token" })
+	m.Acquire(context.Background(), "holder1", "resource1", 10*time.Millisecond)
+	time.Sleep(20 * time.Millisecond)
+	l, ok := m.Get("resource1")
+	if ok {
+		t.Error("expected expired")
+	}
+	if l != nil {
+		t.Error("expected nil")
+	}
+}
+
+func TestManager_Expired(t *testing.T) {
+	m := NewManager(func() string { return "token" })
+	m.Acquire(context.Background(), "a", "r1", 10*time.Millisecond)
+	m.Acquire(context.Background(), "b", "r2", time.Hour)
+	time.Sleep(20 * time.Millisecond)
+	expired := m.Expired()
+	if len(expired) != 1 {
+		t.Errorf("expected 1 expired, got %d", len(expired))
+	}
+}
+
+func TestManager_All(t *testing.T) {
+	m := NewManager(func() string { return "token" })
+	m.Acquire(context.Background(), "a", "r1", time.Hour)
+	m.Acquire(context.Background(), "b", "r2", time.Hour)
+	all := m.All()
+	if len(all) != 2 {
+		t.Errorf("expected 2, got %d", len(all))
+	}
+}
+
+func TestManager_Concurrent(t *testing.T) {
+	m := NewManager(func() string { return "token" })
 	var wg sync.WaitGroup
-	successCount := 0
-	var mu sync.Mutex
-
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 100; i++ {
 		wg.Add(1)
-		go func(id int) {
+		go func(n int) {
 			defer wg.Done()
-			_, err := c.Acquire(ctx, "shared-res", "worker", time.Minute)
-			if err == nil {
-				mu.Lock()
-				successCount++
-				mu.Unlock()
-			}
+			m.Acquire(context.Background(), "holder", "resource-"+string(rune(n)), time.Hour)
 		}(i)
 	}
-
 	wg.Wait()
-	if successCount == 0 {
-		t.Errorf("expected at least one acquisition")
+	if len(m.All()) != 100 {
+		t.Errorf("expected 100, got %d", len(m.All()))
 	}
 }

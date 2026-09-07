@@ -4,79 +4,110 @@ import (
 	"testing"
 )
 
-func TestEvaluator_LiteralBooleans(t *testing.T) {
-	eval := New()
-
-	res, err := eval.Evaluate("true", nil)
-	if err != nil || !res {
-		t.Errorf("expected true, got %v (err: %v)", res, err)
-	}
-
-	res, err = eval.Evaluate("false", nil)
-	if err != nil || res {
-		t.Errorf("expected false, got %v (err: %v)", res, err)
-	}
-
-	res, err = eval.Evaluate("", nil)
-	if err != nil || !res {
-		t.Errorf("empty expression should default to true")
+func TestEvaluator_SetGetVariable(t *testing.T) {
+	e := New()
+	e.SetVariable("x", 42)
+	v, ok := e.GetVariable("x")
+	if !ok || v != 42 {
+		t.Error("expected x=42")
 	}
 }
 
-func TestEvaluator_NumericComparisons(t *testing.T) {
-	eval := New()
-
-	tests := []struct {
-		expr     string
-		expected bool
-	}{
-		{"10 == 10", true},
-		{"10 != 10", false},
-		{"15 > 10", true},
-		{"5 < 10", true},
-		{"10 >= 10", true},
-		{"9 <= 10", true},
-		{"5 > 10", false},
+func TestEvaluator_VariableReference(t *testing.T) {
+	e := New()
+	e.SetVariable("name", "alice")
+	result, err := e.Evaluate("$name")
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	for _, tc := range tests {
-		res, err := eval.Evaluate(tc.expr, nil)
-		if err != nil {
-			t.Errorf("expr '%s' returned error: %v", tc.expr, err)
-		}
-		if res != tc.expected {
-			t.Errorf("expr '%s': expected %v, got %v", tc.expr, tc.expected, res)
-		}
+	if result != "alice" {
+		t.Errorf("expected alice, got %v", result)
 	}
 }
 
-func TestEvaluator_ContextVariables(t *testing.T) {
-	eval := New()
-	ctx := map[string]interface{}{
-		"step": map[string]interface{}{
-			"status": "success",
-			"code":   200,
-		},
-		"retries": 3,
-	}
-
-	res, err := eval.Evaluate("${step.status} == 'success'", ctx)
-	if err != nil || !res {
-		t.Errorf("expected true for step.status == success, got %v (err: %v)", res, err)
-	}
-
-	res, err = eval.Evaluate("${step.code} == 200", ctx)
-	if err != nil || !res {
-		t.Errorf("expected true for step.code == 200, got %v (err: %v)", res, err)
-	}
-
-	res, err = eval.Evaluate("${retries} < 5", ctx)
-	if err != nil || !res {
-		t.Errorf("expected true for retries < 5, got %v (err: %v)", res, err)
-	}
-
-	_, err = eval.Evaluate("${missing.var} == 1", ctx)
+func TestEvaluator_VariableNotFound(t *testing.T) {
+	e := New()
+	_, err := e.Evaluate("$missing")
 	if err == nil {
-		t.Errorf("expected error for missing variable, got nil")
+		t.Error("expected error")
+	}
+}
+
+func TestEvaluator_Integer(t *testing.T) {
+	e := New()
+	result, err := e.Evaluate("42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != 42 {
+		t.Errorf("expected 42, got %v", result)
+	}
+}
+
+func TestEvaluator_Float(t *testing.T) {
+	e := New()
+	result, err := e.Evaluate("3.14")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != 3.14 {
+		t.Errorf("expected 3.14, got %v", result)
+	}
+}
+
+func TestEvaluator_Boolean(t *testing.T) {
+	e := New()
+	result, err := e.Evaluate("true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != true {
+		t.Error("expected true")
+	}
+	result, err = e.Evaluate("false")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != false {
+		t.Error("expected false")
+	}
+}
+
+func TestEvaluator_String(t *testing.T) {
+	e := New()
+	result, err := e.Evaluate(`"hello"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != "hello" {
+		t.Errorf("expected hello, got %v", result)
+	}
+}
+
+func TestEvaluator_EvaluateBool(t *testing.T) {
+	e := New()
+	e.SetVariable("flag", true)
+	b, err := e.EvaluateBool("$flag")
+	if err != nil || !b {
+		t.Error("expected true")
+	}
+	e.SetVariable("flag", 0)
+	b, err = e.EvaluateBool("$flag")
+	if err != nil || b {
+		t.Error("expected false")
+	}
+}
+
+func TestEvaluator_EvaluateInt(t *testing.T) {
+	e := New()
+	e.SetVariable("num", 10)
+	i, err := e.EvaluateInt("$num")
+	if err != nil || i != 10 {
+		t.Error("expected 10")
+	}
+	e.SetVariable("str", "42")
+	i, err = e.EvaluateInt("$str")
+	if err != nil || i != 42 {
+		t.Error("expected 42 from string")
 	}
 }

@@ -2,186 +2,113 @@ package hook
 
 import (
 	"context"
-	"errors"
-	"sync"
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
-
-	"go.uber.org/goleak"
-
-	ttypes "github.com/tempest-io/tempest/pkg/types"
 )
 
-func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
-}
-
-type testHook struct {
-	name             string
-	workflowStarted  int
-	stepCompleted    int
-	workflowFinished int
-	mu               sync.Mutex
-	delay            time.Duration
-	fail             bool
-}
-
-func newTestHook(name string) *testHook {
-	return &testHook{name: name}
-}
-
-func (h *testHook) Name() string { return h.name }
-
-func (h *testHook) OnWorkflowStarted(ctx context.Context, run *ttypes.Run) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.delay > 0 {
-		select {
-		case <-time.After(h.delay):
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+func TestRegistry_RegisterExecute(t *testing.T) {
+	r := NewRegistry[string]()
+	var called atomic.Bool
+	r.Register("test", 1, func(ctx context.Context, event string) error {
+		called.Store(true)
+		return nil
+	})
+	if err := r.Execute(context.Background(), "event"); err != nil {
+		t.Fatal(err)
 	}
-	if h.fail {
-		return errors.New("simulated hook failure")
-	}
-	h.workflowStarted++
-	return nil
-}
-
-func (h *testHook) OnStepCompleted(ctx context.Context, run *ttypes.Run, step *ttypes.StepRun) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.stepCompleted++
-	return nil
-}
-
-func (h *testHook) OnWorkflowFinished(ctx context.Context, run *ttypes.Run) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.workflowFinished++
-	return nil
-}
-
-func TestHook_SyncNotification(t *testing.T) {
-	reg := NewRegistry()
-	defer reg.Close()
-
-	h := newTestHook("sync-hook")
-	if err := reg.Register(h, HookFilter{}, false, 1*time.Second); err != nil {
-		t.Fatalf("Register failed: %v", err)
-	}
-
-	run := &ttypes.Run{
-		ID:        "run-1",
-		Namespace: "default",
-		State:     ttypes.StateRunning,
-	}
-
-	errs := reg.NotifyWorkflowStarted(context.Background(), run)
-	if len(errs) != 0 {
-		t.Fatalf("unexpected errors: %v", errs)
-	}
-
-	h.mu.Lock()
-	started := h.workflowStarted
-	h.mu.Unlock()
-	if started != 1 {
-		t.Errorf("expected 1 started notification, got %d", started)
+	if !called.Load() {
+		t.Error("expected hook called")
 	}
 }
 
-func TestHook_AsyncNotification(t *testing.T) {
-	reg := NewRegistry()
-	defer reg.Close()
-
-	h := newTestHook("async-hook")
-	_ = reg.Register(h, HookFilter{}, true, 1*time.Second)
-
-	run := &ttypes.Run{
-		ID:        "run-2",
-		Namespace: "default",
-		State:     ttypes.StateRunning,
-	}
-
-	_ = reg.NotifyWorkflowStarted(context.Background(), run)
-
-	// Wait for async execution
-	deadline := time.Now().Add(1 * time.Second)
-	for time.Now().Before(deadline) {
-		h.mu.Lock()
-		count := h.workflowStarted
-		h.mu.Unlock()
-		if count == 1 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.workflowStarted != 1 {
-		t.Errorf("expected 1 async notification, got %d", h.workflowStarted)
+func TestRegistry_Priority(t *testing.T) {
+	r := NewRegistry[string]()
+	var order []string
+	r.Register("low", 10, func(ctx context.Context, event string) error {
+		order = append(order, "low")
+		return nil
+	})
+	r.Register("high", 1, func(ctx context.Context, event string) error {
+		order = append(order, "high")
+		return nil
+	})
+	r.Execute(context.Background(), "event")
+	if len(order) != 2 || order[0] != "high" {
+		t.Error("expected high priority first")
 	}
 }
 
-func TestHook_FilterMatching(t *testing.T) {
-	reg := NewRegistry()
-	defer reg.Close()
-
-	h := newTestHook("filtered-hook")
-	_ = reg.Register(h, HookFilter{
-		Namespaces:   []string{"prod"},
-		FailuresOnly: true,
-	}, false, 1*time.Second)
-
-	// Non-matching run (namespace=default)
-	run1 := &ttypes.Run{
-		ID:        "run-1",
-		Namespace: "default",
-		State:     ttypes.StateFailed,
-	}
-	_ = reg.NotifyWorkflowFinished(context.Background(), run1)
-	if h.workflowFinished != 0 {
-		t.Errorf("hook should not match default namespace")
-	}
-
-	// Non-matching run (state=SUCCEEDED)
-	run2 := &ttypes.Run{
-		ID:        "run-2",
-		Namespace: "prod",
-		State:     ttypes.StateSucceeded,
-	}
-	_ = reg.NotifyWorkflowFinished(context.Background(), run2)
-	if h.workflowFinished != 0 {
-		t.Errorf("hook should not match succeeded run")
-	}
-
-	// Matching run (prod + FAILED)
-	run3 := &ttypes.Run{
-		ID:        "run-3",
-		Namespace: "prod",
-		State:     ttypes.StateFailed,
-	}
-	_ = reg.NotifyWorkflowFinished(context.Background(), run3)
-	if h.workflowFinished != 1 {
-		t.Errorf("hook should match prod failed run")
+func TestRegistry_Unregister(t *testing.T) {
+	r := NewRegistry[string]()
+	var called atomic.Bool
+	r.Register("test", 1, func(ctx context.Context, event string) error {
+		called.Store(true)
+		return nil
+	})
+	r.Unregister("test")
+	r.Execute(context.Background(), "event")
+	if called.Load() {
+		t.Error("expected hook not called after unregister")
 	}
 }
 
-func TestHook_TimeoutIsolation(t *testing.T) {
-	reg := NewRegistry()
-	defer reg.Close()
+func TestRegistry_HookError(t *testing.T) {
+	r := NewRegistry[string]()
+	r.Register("fail", 1, func(ctx context.Context, event string) error {
+		return fmt.Errorf("hook error")
+	})
+	err := r.Execute(context.Background(), "event")
+	if err == nil {
+		t.Error("expected error")
+	}
+}
 
-	hSlow := newTestHook("slow-hook")
-	hSlow.delay = 200 * time.Millisecond
+func TestRegistry_MultipleHooksSameName(t *testing.T) {
+	r := NewRegistry[string]()
+	var count atomic.Int32
+	r.Register("multi", 1, func(ctx context.Context, event string) error {
+		count.Add(1)
+		return nil
+	})
+	r.Register("multi", 1, func(ctx context.Context, event string) error {
+		count.Add(1)
+		return nil
+	})
+	r.Execute(context.Background(), "event")
+	if count.Load() != 2 {
+		t.Errorf("expected 2 calls, got %d", count.Load())
+	}
+}
 
-	// Hook timeout of 30ms should cancel slow hook
-	_ = reg.Register(hSlow, HookFilter{}, false, 30*time.Millisecond)
+func TestRegistry_ExecuteAsync(t *testing.T) {
+	r := NewRegistry[string]()
+	var called atomic.Bool
+	r.Register("async", 1, func(ctx context.Context, event string) error {
+		called.Store(true)
+		return nil
+	})
+	r.ExecuteAsync(context.Background(), "event")
+	time.Sleep(10 * time.Millisecond)
+	if !called.Load() {
+		t.Error("expected async hook called")
+	}
+}
 
-	run := &ttypes.Run{ID: "run-slow"}
-	errs := reg.NotifyWorkflowStarted(context.Background(), run)
-	if len(errs) != 1 {
-		t.Fatalf("expected 1 error for timed out hook, got %d", len(errs))
+func TestRegistry_HookCount(t *testing.T) {
+	r := NewRegistry[string]()
+	r.Register("a", 1, func(ctx context.Context, event string) error { return nil })
+	r.Register("b", 1, func(ctx context.Context, event string) error { return nil })
+	r.Register("b", 1, func(ctx context.Context, event string) error { return nil })
+	if r.HookCount() != 3 {
+		t.Errorf("expected 3, got %d", r.HookCount())
+	}
+}
+
+func TestRegistry_EmptyExecute(t *testing.T) {
+	r := NewRegistry[string]()
+	if err := r.Execute(context.Background(), "event"); err != nil {
+		t.Error("expected no error for empty registry")
 	}
 }
