@@ -8,11 +8,12 @@ import (
 
 func workflowsCmd() *Command {
 	return &Command{
-		Name:     "workflows",
-		Summary:  "manage workflow definitions",
+		Name:    "workflows",
+		Summary: "manage workflow definitions",
 		Children: []*Command{
 			workflowsListCmd(),
 			workflowsGetCmd(),
+			workflowsSubmitCmd(),
 		},
 	}
 }

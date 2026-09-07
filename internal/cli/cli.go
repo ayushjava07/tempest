@@ -113,9 +113,17 @@ func resolve(cmd *Command, args []string) (*Command, []string, error) {
 }
 
 func registerCommands(root *Command) {
+	wf := workflowsCmd()
+	wfAlias := &Command{
+		Name:     "workflow",
+		Summary:  wf.Summary,
+		Children: wf.Children,
+		Run:      wf.Run,
+	}
 	root.Children = []*Command{
 		serverCmd(),
-		workflowsCmd(),
+		wf,
+		wfAlias,
 		runCmd(),
 		configCmd(),
 		adminCmd(),
