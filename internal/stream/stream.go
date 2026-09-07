@@ -2,217 +2,166 @@ package stream
 
 import (
 	"context"
-	"errors"
-	"hash/fnv"
+	"fmt"
 	"sync"
-	"sync/atomic"
-	"time"
 )
 
-var (
-	ErrTopicNotFound      = errors.New("stream: topic not found")
-	ErrPartitionNotFound  = errors.New("stream: partition index out of range")
-	ErrOffsetOutOfRange   = errors.New("stream: offset out of range")
-	ErrNoConsumersInGroup = errors.New("stream: no active consumers in consumer group")
-)
+type Processor[T any] func(ctx context.Context, item T) error
 
-// Record represents an individual sequenced message within a partition.
-type Record struct {
-	Topic     string
-	Partition int
-	Offset    uint64
-	Key       string
-	Value     []byte
-	Headers   map[string]string
-	Timestamp time.Time
+type Pipeline[T any] struct {
+	mu         sync.Mutex
+	processors []Processor[T]
 }
 
-// Partition manages an append-only sequence of records.
-type Partition struct {
-	mu      sync.RWMutex
-	id      int
-	records []Record
-	nextOff atomic.Uint64
+func NewPipeline[T any]() *Pipeline[T] {
+	return &Pipeline[T]{}
 }
 
-func NewPartition(id int) *Partition {
-	return &Partition{
-		id:      id,
-		records: make([]Record, 0, 128),
-	}
-}
-
-func (p *Partition) Append(key string, val []byte, headers map[string]string) Record {
+func (p *Pipeline[T]) Add(processor Processor[T]) *Pipeline[T] {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
-	off := p.nextOff.Add(1) - 1
-	rec := Record{
-		Partition: p.id,
-		Offset:    off,
-		Key:       key,
-		Value:     append([]byte(nil), val...),
-		Headers:   headers,
-		Timestamp: time.Now().UTC(),
-	}
-	p.records = append(p.records, rec)
-	return rec
+	p.processors = append(p.processors, processor)
+	return p
 }
 
-func (p *Partition) ReadFrom(offset uint64, maxRecords int) ([]Record, error) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	if offset > p.nextOff.Load() {
-		return nil, ErrOffsetOutOfRange
-	}
-
-	var out []Record
-	for _, r := range p.records {
-		if r.Offset >= offset {
-			out = append(out, r)
-			if maxRecords > 0 && len(out) >= maxRecords {
-				break
-			}
+func (p *Pipeline[T]) Process(ctx context.Context, item T) error {
+	p.mu.Lock()
+	procs := make([]Processor[T], len(p.processors))
+	copy(procs, p.processors)
+	p.mu.Unlock()
+	for _, proc := range procs {
+		if err := proc(ctx, item); err != nil {
+			return fmt.Errorf("pipeline error: %w", err)
 		}
 	}
-	return out, nil
+	return nil
 }
 
-func (p *Partition) HighWaterMark() uint64 {
-	return p.nextOff.Load()
-}
-
-// Topic holds multiple partitions for horizontal throughput scaling.
-type Topic struct {
-	Name       string
-	Partitions []*Partition
-}
-
-func NewTopic(name string, numPartitions int) *Topic {
-	if numPartitions <= 0 {
-		numPartitions = 4
+func (p *Pipeline[T]) ProcessBatch(ctx context.Context, items []T) error {
+	for _, item := range items {
+		if err := p.Process(ctx, item); err != nil {
+			return err
+		}
 	}
-	t := &Topic{
-		Name:       name,
-		Partitions: make([]*Partition, numPartitions),
+	return nil
+}
+
+type Buffer[T any] struct {
+	mu       sync.Mutex
+	items    []T
+	capacity int
+	cond     *sync.Cond
+	closed   bool
+}
+
+func NewBuffer[T any](capacity int) *Buffer[T] {
+	b := &Buffer[T]{
+		items:    make([]T, 0, capacity),
+		capacity: capacity,
 	}
-	for i := 0; i < numPartitions; i++ {
-		t.Partitions[i] = NewPartition(i)
+	b.cond = sync.NewCond(&b.mu)
+	return b
+}
+
+func (b *Buffer[T]) Push(item T) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return fmt.Errorf("buffer closed")
 	}
-	return t
-}
-
-func (t *Topic) PartitionForKey(key string) int {
-	if key == "" {
-		return 0
+	for len(b.items) >= b.capacity {
+		b.cond.Wait()
+		if b.closed {
+			return fmt.Errorf("buffer closed")
+		}
 	}
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(key))
-	return int(h.Sum32() % uint32(len(t.Partitions)))
+	b.items = append(b.items, item)
+	b.cond.Signal()
+	return nil
 }
 
-func (t *Topic) Publish(key string, val []byte, headers map[string]string) Record {
-	partID := t.PartitionForKey(key)
-	rec := t.Partitions[partID].Append(key, val, headers)
-	rec.Topic = t.Name
-	return rec
-}
-
-// ConsumerGroup coordinates balanced partition assignment among consumer workers.
-type ConsumerGroup struct {
-	mu          sync.RWMutex
-	name        string
-	topic       *Topic
-	consumers   map[string]bool  // consumerID -> active
-	assignments map[string][]int // consumerID -> assigned partition IDs
-	offsets     map[int]uint64   // partitionID -> committed offset
-}
-
-func NewConsumerGroup(name string, topic *Topic) *ConsumerGroup {
-	return &ConsumerGroup{
-		name:        name,
-		topic:       topic,
-		consumers:   make(map[string]bool),
-		assignments: make(map[string][]int),
-		offsets:     make(map[int]uint64),
+func (b *Buffer[T]) Pop() (T, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for len(b.items) == 0 {
+		if b.closed {
+			var zero T
+			return zero, fmt.Errorf("buffer closed")
+		}
+		b.cond.Wait()
 	}
+	item := b.items[0]
+	b.items = b.items[1:]
+	b.cond.Signal()
+	return item, nil
 }
 
-// Join registers a consumer into the group and triggers partition rebalancing.
-func (g *ConsumerGroup) Join(consumerID string) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.consumers[consumerID] = true
-	g.rebalanceLocked()
+func (b *Buffer[T]) Close() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.closed = true
+	b.cond.Broadcast()
 }
 
-// Leave removes a consumer and triggers partition rebalancing.
-func (g *ConsumerGroup) Leave(consumerID string) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	delete(g.consumers, consumerID)
-	delete(g.assignments, consumerID)
-	g.rebalanceLocked()
+func (b *Buffer[T]) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.items)
 }
 
-func (g *ConsumerGroup) rebalanceLocked() {
-	g.assignments = make(map[string][]int)
-	activeList := make([]string, 0, len(g.consumers))
-	for c := range g.consumers {
-		activeList = append(activeList, c)
+func (b *Buffer[T]) Cap() int {
+	return b.capacity
+}
+
+type FanOut[T any] struct {
+	mu        sync.RWMutex
+	channels  []chan T
+	closed    bool
+}
+
+func NewFanOut[T any](count int, bufferSize int) *FanOut[T] {
+	f := &FanOut[T]{
+		channels: make([]chan T, count),
 	}
+	for i := 0; i < count; i++ {
+		f.channels[i] = make(chan T, bufferSize)
+	}
+	return f
+}
 
-	if len(activeList) == 0 {
+func (f *FanOut[T]) Send(item T) error {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if f.closed {
+		return fmt.Errorf("fanout closed")
+	}
+	for _, ch := range f.channels {
+		select {
+		case ch <- item:
+		default:
+			return fmt.Errorf("channel full")
+		}
+	}
+	return nil
+}
+
+func (f *FanOut[T]) Channel(index int) (<-chan T, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if index < 0 || index >= len(f.channels) {
+		return nil, fmt.Errorf("invalid index")
+	}
+	return f.channels[index], nil
+}
+
+func (f *FanOut[T]) Close() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
 		return
 	}
-
-	// Round-robin partition distribution
-	for partID := 0; partID < len(g.topic.Partitions); partID++ {
-		consumer := activeList[partID%len(activeList)]
-		g.assignments[consumer] = append(g.assignments[consumer], partID)
+	f.closed = true
+	for _, ch := range f.channels {
+		close(ch)
 	}
-}
-
-// GetAssignments returns partitions currently owned by consumerID.
-func (g *ConsumerGroup) GetAssignments(consumerID string) []int {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	parts := g.assignments[consumerID]
-	return append([]int(nil), parts...)
-}
-
-// CommitOffset saves consumer progress for a partition.
-func (g *ConsumerGroup) CommitOffset(partitionID int, offset uint64) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.offsets[partitionID] = offset
-}
-
-// FetchOffset retrieves the last committed offset for a partition.
-func (g *ConsumerGroup) FetchOffset(partitionID int) uint64 {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	return g.offsets[partitionID]
-}
-
-// FetchMessages polls new uncommitted records for the specified consumer.
-func (g *ConsumerGroup) FetchMessages(ctx context.Context, consumerID string, maxPerPart int) ([]Record, error) {
-	g.mu.RLock()
-	assigned, ok := g.assignments[consumerID]
-	g.mu.RUnlock()
-
-	if !ok || len(assigned) == 0 {
-		return nil, nil
-	}
-
-	var all []Record
-	for _, partID := range assigned {
-		lastOff := g.FetchOffset(partID)
-		recs, err := g.topic.Partitions[partID].ReadFrom(lastOff, maxPerPart)
-		if err == nil && len(recs) > 0 {
-			all = append(all, recs...)
-		}
-	}
-	return all, nil
 }

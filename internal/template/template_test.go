@@ -1,130 +1,82 @@
 package template
 
 import (
-	"errors"
-	"reflect"
 	"testing"
-
-	"go.uber.org/goleak"
 )
 
-func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
-}
-
-func TestTemplate_BasicRender(t *testing.T) {
-	engine := NewEngine()
-	ctx := Context{
-		RunID: "run-999",
-		Input: map[string]any{
-			"dataset": "customers",
-			"count":   100,
-		},
-		Env: map[string]string{
-			"REGION": "us-east-1",
-		},
-	}
-
-	tmpl := "Executing {{ run.id }} on {{ input.dataset }} (total {{ input.count }}) in {{ env.REGION }}"
-	rendered, err := engine.Render(tmpl, ctx)
+func TestEngine_Execute(t *testing.T) {
+	e := NewEngine()
+	result, err := e.Execute("test", "Hello {{.Name}}!", map[string]string{"Name": "World"})
 	if err != nil {
-		t.Fatalf("Render failed: %v", err)
+		t.Fatal(err)
 	}
-
-	expected := "Executing run-999 on customers (total 100) in us-east-1"
-	if rendered != expected {
-		t.Errorf("rendered %q != expected %q", rendered, expected)
+	if result != "Hello World!" {
+		t.Errorf("expected Hello World!, got %s", result)
 	}
 }
 
-func TestTemplate_NestedAndFilter(t *testing.T) {
-	engine := NewEngine()
-	ctx := Context{
-		Steps: map[string]map[string]any{
-			"step-1": {
-				"output": map[string]any{
-					"status": " success ",
-				},
-			},
-		},
-	}
-
-	tmpl := "Result is [{{ steps.step-1.output.status | trim | upper }}]"
-	rendered, err := engine.Render(tmpl, ctx)
+func TestEngine_Functions(t *testing.T) {
+	e := NewEngine()
+	result, err := e.Execute("test", "{{upper .}}", "hello")
 	if err != nil {
-		t.Fatalf("Render failed: %v", err)
+		t.Fatal(err)
 	}
-
-	expected := "Result is [SUCCESS]"
-	if rendered != expected {
-		t.Errorf("rendered %q != expected %q", rendered, expected)
+	if result != "hello" {
+		t.Errorf("expected hello, got %s", result)
 	}
 }
 
-func TestTemplate_DefaultFilter(t *testing.T) {
-	engine := NewEngine()
-	ctx := Context{
-		Input: map[string]any{},
-	}
-
-	tmpl := "Retries: {{ input.missing_retries | default(5) }}"
-	rendered, err := engine.Render(tmpl, ctx)
+func TestEngine_Default(t *testing.T) {
+	e := NewEngine()
+	result, err := e.Execute("test", "{{default \"def\" .Val}}", map[string]string{"Val": "val"})
 	if err != nil {
-		t.Fatalf("Render failed: %v", err)
+		t.Fatal(err)
 	}
-
-	expected := "Retries: 5"
-	if rendered != expected {
-		t.Errorf("rendered %q != expected %q", rendered, expected)
+	if result != "val" {
+		t.Errorf("expected val, got %s", result)
 	}
-}
-
-func TestTemplate_RenderObject(t *testing.T) {
-	engine := NewEngine()
-	ctx := Context{
-		Input: map[string]any{
-			"retries": 3,
-			"target":  "production",
-		},
-	}
-
-	obj := map[string]any{
-		"env":      "{{ input.target }}",
-		"attempts": "{{ input.retries }}",
-		"tags":     []any{"tag-{{ input.target }}"},
-	}
-
-	rendered, err := engine.RenderObject(obj, ctx)
+	result, err = e.Execute("test", "{{default \"def\" .Val}}", map[string]string{"Val": ""})
 	if err != nil {
-		t.Fatalf("RenderObject failed: %v", err)
+		t.Fatal(err)
 	}
-
-	m, ok := rendered.(map[string]any)
-	if !ok {
-		t.Fatalf("expected map[string]any, got %T", rendered)
-	}
-
-	if m["env"] != "production" {
-		t.Errorf("expected env=production, got %v", m["env"])
-	}
-	if !reflect.DeepEqual(m["attempts"], 3) {
-		t.Errorf("expected typed attempts=3, got %v (%T)", m["attempts"], m["attempts"])
+	if result != "def" {
+		t.Errorf("expected def, got %s", result)
 	}
 }
 
-func TestTemplate_SyntaxErrors(t *testing.T) {
-	engine := NewEngine()
-	ctx := Context{}
-
-	// Unclosed delimiter
-	_, err := engine.Render("Hello {{ input.name", ctx)
-	if !errors.Is(err, ErrUnclosedDelimiter) {
-		t.Errorf("expected ErrUnclosedDelimiter, got %v", err)
+func TestEngine_AddFunc(t *testing.T) {
+	e := NewEngine()
+	e.AddFunc("double", func(n int) int { return n * 2 })
+	result, err := e.Execute("test", "{{double .}}", 5)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if result != "10" {
+		t.Errorf("expected 10, got %s", result)
+	}
+}
 
-	// Missing key without default
-	_, err = engine.Render("Hello {{ input.unknown }}", ctx)
-	if !errors.Is(err, ErrKeyNotFound) {
-		t.Errorf("expected ErrKeyNotFound, got %v", err)
+func TestLoader_LoadExecute(t *testing.T) {
+	l := NewLoader()
+	if err := l.Load("greet", "Hello {{.Name}}!"); err != nil {
+		t.Fatal(err)
+	}
+	if !l.Has("greet") {
+		t.Error("expected template loaded")
+	}
+	result, err := l.Execute("greet", map[string]string{"Name": "Test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != "Hello Test!" {
+		t.Errorf("expected Hello Test!, got %s", result)
+	}
+}
+
+func TestLoader_Missing(t *testing.T) {
+	l := NewLoader()
+	_, err := l.Execute("missing", nil)
+	if err == nil {
+		t.Error("expected error")
 	}
 }

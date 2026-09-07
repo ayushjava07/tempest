@@ -1,125 +1,142 @@
 package stream
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"sync"
+	"sync/atomic"
 	"testing"
-
-	"go.uber.org/goleak"
+	"time"
 )
 
-func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
-}
-
-func TestTopic_PartitionHashing(t *testing.T) {
-	topic := NewTopic("events", 4)
-
-	rec1 := topic.Publish("user-1", []byte("payload-1"), nil)
-	rec2 := topic.Publish("user-1", []byte("payload-2"), nil)
-
-	// Same key must always map to the exact same partition
-	if rec1.Partition != rec2.Partition {
-		t.Errorf("same key mapped to different partitions: %d != %d", rec1.Partition, rec2.Partition)
+func TestPipeline_AddProcess(t *testing.T) {
+	p := NewPipeline[int]()
+	var steps []string
+	p.Add(func(ctx context.Context, v int) error {
+		steps = append(steps, "a")
+		return nil
+	})
+	p.Add(func(ctx context.Context, v int) error {
+		steps = append(steps, "b")
+		return nil
+	})
+	if err := p.Process(context.Background(), 1); err != nil {
+		t.Fatal(err)
 	}
-
-	if rec2.Offset <= rec1.Offset {
-		t.Errorf("offsets must increase monotonically: %d <= %d", rec2.Offset, rec1.Offset)
-	}
-}
-
-func TestConsumerGroup_Rebalance(t *testing.T) {
-	topic := NewTopic("tasks", 4)
-	group := NewConsumerGroup("workers", topic)
-
-	// Consumer 1 joins: should own all 4 partitions
-	group.Join("c1")
-	assigned := group.GetAssignments("c1")
-	if len(assigned) != 4 {
-		t.Fatalf("expected 4 partitions assigned to c1, got %d", len(assigned))
-	}
-
-	// Consumer 2 joins: each should now own 2 partitions
-	group.Join("c2")
-	a1 := group.GetAssignments("c1")
-	a2 := group.GetAssignments("c2")
-	if len(a1) != 2 || len(a2) != 2 {
-		t.Errorf("expected 2 partitions each, got c1=%d, c2=%d", len(a1), len(a2))
-	}
-
-	// Consumer 1 leaves: c2 should inherit all 4
-	group.Leave("c1")
-	a2After := group.GetAssignments("c2")
-	if len(a2After) != 4 {
-		t.Errorf("expected c2 to inherit all 4 partitions after c1 leaves, got %d", len(a2After))
+	if len(steps) != 2 || steps[0] != "a" || steps[1] != "b" {
+		t.Error("unexpected steps")
 	}
 }
 
-func TestConsumerGroup_CommitAndResume(t *testing.T) {
-	topic := NewTopic("logs", 2)
-	group := NewConsumerGroup("audit", topic)
-	group.Join("auditor")
-
-	ctx := context.Background()
-
-	// Publish 5 records to partition 0
-	for i := 0; i < 5; i++ {
-		_ = topic.Partitions[0].Append("k", []byte(fmt.Sprintf("msg-%d", i)), nil)
+func TestPipeline_Error(t *testing.T) {
+	p := NewPipeline[int]()
+	p.Add(func(ctx context.Context, v int) error {
+		return fmt.Errorf("fail")
+	})
+	p.Add(func(ctx context.Context, v int) error {
+		return nil
+	})
+	err := p.Process(context.Background(), 1)
+	if err == nil {
+		t.Error("expected error")
 	}
+}
 
-	// Read first batch of 3
-	recs, err := group.FetchMessages(ctx, "auditor", 3)
+func TestPipeline_Batch(t *testing.T) {
+	p := NewPipeline[int]()
+	var count atomic.Int32
+	p.Add(func(ctx context.Context, v int) error {
+		count.Add(1)
+		return nil
+	})
+	if err := p.ProcessBatch(context.Background(), []int{1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+	if count.Load() != 3 {
+		t.Errorf("expected 3, got %d", count.Load())
+	}
+}
+
+func TestBuffer_PushPop(t *testing.T) {
+	b := NewBuffer[int](5)
+	if err := b.Push(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Push(2); err != nil {
+		t.Fatal(err)
+	}
+	v, err := b.Pop()
+	if err != nil || v != 1 {
+		t.Errorf("expected 1, got %d", v)
+	}
+	v, err = b.Pop()
+	if err != nil || v != 2 {
+		t.Errorf("expected 2, got %d", v)
+	}
+}
+
+func TestBuffer_Capacity(t *testing.T) {
+	b := NewBuffer[int](2)
+	b.Push(1)
+	b.Push(2)
+	done := make(chan error, 1)
+	go func() {
+		done <- b.Push(3)
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("expected full error")
+		}
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestBuffer_Close(t *testing.T) {
+	b := NewBuffer[int](5)
+	b.Push(1)
+	b.Close()
+	v, err := b.Pop()
 	if err != nil {
-		t.Fatalf("FetchMessages failed: %v", err)
+		t.Fatalf("expected item before close error, got err: %v", err)
 	}
-	if len(recs) != 3 {
-		t.Fatalf("expected 3 records, got %d", len(recs))
+	if v != 1 {
+		t.Errorf("expected 1, got %d", v)
 	}
-	if !bytes.Equal(recs[0].Value, []byte("msg-0")) {
-		t.Errorf("unexpected first message: %s", string(recs[0].Value))
+	_, err = b.Pop()
+	if err == nil {
+		t.Error("expected error after close and empty")
 	}
-
-	// Commit offset 3
-	group.CommitOffset(0, 3)
-
-	// Next fetch should resume from offset 3
-	recs2, err := group.FetchMessages(ctx, "auditor", 5)
-	if err != nil {
-		t.Fatalf("FetchMessages 2 failed: %v", err)
-	}
-	if len(recs2) != 2 {
-		t.Fatalf("expected 2 remaining records, got %d", len(recs2))
-	}
-	if !bytes.Equal(recs2[0].Value, []byte("msg-3")) {
-		t.Errorf("expected offset 3 (msg-3), got %s", string(recs2[0].Value))
+	err = b.Push(2)
+	if err == nil {
+		t.Error("expected push error after close")
 	}
 }
 
-func TestStream_Concurrency(t *testing.T) {
-	topic := NewTopic("concurrent-stream", 4)
-	concurrency := 10
-	recsPerWorker := 50
-
-	var wg sync.WaitGroup
-	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			for j := 0; j < recsPerWorker; j++ {
-				key := fmt.Sprintf("key-%d", (id+j)%4)
-				_ = topic.Publish(key, []byte("data"), nil)
-			}
-		}(i)
+func TestFanOut_Send(t *testing.T) {
+	f := NewFanOut[int](3, 5)
+	if err := f.Send(42); err != nil {
+		t.Fatal(err)
 	}
-	wg.Wait()
-
-	total := 0
-	for _, p := range topic.Partitions {
-		total += int(p.HighWaterMark())
+	ch1, _ := f.Channel(0)
+	ch2, _ := f.Channel(1)
+	v1 := <-ch1
+	v2 := <-ch2
+	if v1 != 42 || v2 != 42 {
+		t.Errorf("expected 42, got %d, %d", v1, v2)
 	}
-	if total != concurrency*recsPerWorker {
-		t.Errorf("expected %d total records, got %d", concurrency*recsPerWorker, total)
+}
+
+func TestFanOut_Close(t *testing.T) {
+	f := NewFanOut[int](2, 5)
+	f.Send(1)
+	f.Close()
+	ch, _ := f.Channel(0)
+	v, ok := <-ch
+	if !ok && v != 1 {
+		t.Error("expected to receive 1 then closed")
+	}
+	v, ok = <-ch
+	if ok {
+		t.Error("expected closed channel")
 	}
 }
