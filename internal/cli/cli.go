@@ -101,15 +101,19 @@ func parseGlobalFlags(args []string, gf *GlobalFlags) []string {
 }
 
 func resolve(cmd *Command, args []string) (*Command, []string, error) {
+	return resolvePath(cmd, args, nil)
+}
+
+func resolvePath(cmd *Command, args []string, path []string) (*Command, []string, error) {
 	if len(args) == 0 {
-		return cmd, nil, nil
+		return cmd, path, nil
 	}
 	for _, child := range cmd.Children {
 		if child.Name == args[0] {
-			return resolve(child, args[1:])
+			return resolvePath(child, args[1:], append(path, args[0]))
 		}
 	}
-	return cmd, nil, nil
+	return cmd, path, nil
 }
 
 func registerCommands(root *Command) {
