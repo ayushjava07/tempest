@@ -79,9 +79,9 @@ func TestProcessor_RegisterHandler(t *testing.T) {
 func TestProcessor_Retry(t *testing.T) {
 	ms := NewMemoryStore()
 	p := NewProcessor(ms, 100*time.Millisecond)
-	var attempts int
+	var attempts atomic.Int32
 	p.RegisterHandler("test", func(ctx context.Context, msg *Message) error {
-		attempts++
+		attempts.Add(1)
 		return fmt.Errorf("fail")
 	})
 	msg := &Message{ID: "1", Type: "test", Status: StatusPending, Payload: json.RawMessage(`{}`)}
@@ -89,8 +89,8 @@ func TestProcessor_Retry(t *testing.T) {
 	p.Start(context.Background())
 	time.Sleep(3 * time.Second)
 	p.Stop()
-	if attempts < 2 {
-		t.Errorf("expected at least 2 attempts, got %d", attempts)
+	if attempts.Load() < 2 {
+		t.Errorf("expected at least 2 attempts, got %d", attempts.Load())
 	}
 	got, _ := ms.Get(context.Background(), "1")
 	if got.Status != StatusFailed && got.Status != StatusPending {

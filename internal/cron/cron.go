@@ -48,8 +48,8 @@ func parseTime(s string) (int, int) {
 }
 
 type jobState struct {
-	job      *Job
-	nextRun  time.Time
+	job     *Job
+	nextRun time.Time
 }
 
 type Scheduler struct {
@@ -90,12 +90,13 @@ func (s *Scheduler) run(ctx context.Context) {
 			s.mu.Lock()
 			for _, js := range s.jobs {
 				if now.After(js.nextRun) || now.Equal(js.nextRun) {
+					js.nextRun = js.job.Schedule.Next(now)
+					fn := js.job.Func
 					s.wg.Add(1)
-					go func(j *jobState) {
+					go func() {
 						defer s.wg.Done()
-						_ = j.job.Func(ctx)
-						j.nextRun = j.job.Schedule.Next(now)
-					}(js)
+						_ = fn(ctx)
+					}()
 				}
 			}
 			s.mu.Unlock()

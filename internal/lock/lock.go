@@ -6,10 +6,10 @@ import (
 )
 
 type Lock struct {
-	mu         sync.Mutex
-	holder     string
-	held       bool
-	waiters    []chan struct{}
+	mu      sync.Mutex
+	holder  string
+	held    bool
+	waiters []chan struct{}
 }
 
 func New() *Lock {
@@ -82,12 +82,12 @@ func (l *Lock) Waiters() int {
 }
 
 type RWLock struct {
-	mu           sync.Mutex
-	readers      int
-	writerHeld   bool
+	mu            sync.Mutex
+	readers       int
+	writerHeld    bool
 	writerWaiters int
 	readerWaiters []chan struct{}
-	writerQueue  []chan struct{}
+	writerQueue   []chan struct{}
 }
 
 func NewRWLock() *RWLock {

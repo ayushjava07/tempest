@@ -9,14 +9,14 @@ import (
 )
 
 type Message struct {
-	ID        string         `json:"id"`
-	Type      string         `json:"type"`
-	Payload   json.RawMessage `json:"payload"`
-	Headers   map[string]string `json:"headers"`
-	CreatedAt time.Time      `json:"created_at"`
-	RetryCount int           `json:"retry_count"`
-	NextRetry time.Time      `json:"next_retry"`
-	Status    string         `json:"status"`
+	ID         string            `json:"id"`
+	Type       string            `json:"type"`
+	Payload    json.RawMessage   `json:"payload"`
+	Headers    map[string]string `json:"headers"`
+	CreatedAt  time.Time         `json:"created_at"`
+	RetryCount int               `json:"retry_count"`
+	NextRetry  time.Time         `json:"next_retry"`
+	Status     string            `json:"status"`
 }
 
 const (

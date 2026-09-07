@@ -3,6 +3,7 @@ package lock
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -35,15 +36,15 @@ func TestLock_TryLock(t *testing.T) {
 func TestLock_Contention(t *testing.T) {
 	l := New()
 	l.Lock(context.Background())
-	var got bool
+	var got atomic.Bool
 	go func() {
 		err := l.Lock(context.Background())
-		got = err == nil
+		got.Store(err == nil)
 	}()
 	time.Sleep(10 * time.Millisecond)
 	l.Unlock()
 	time.Sleep(10 * time.Millisecond)
-	if !got {
+	if !got.Load() {
 		t.Error("expected waiter to get lock")
 	}
 }
@@ -107,15 +108,15 @@ func TestRWLock_WriteLock(t *testing.T) {
 func TestRWLock_ReadersBlockWriter(t *testing.T) {
 	rw := NewRWLock()
 	rw.RLock(context.Background())
-	var writerGot bool
+	var writerGot atomic.Bool
 	go func() {
 		err := rw.Lock(context.Background())
-		writerGot = err == nil
+		writerGot.Store(err == nil)
 	}()
 	time.Sleep(10 * time.Millisecond)
 	rw.RUnlock()
 	time.Sleep(10 * time.Millisecond)
-	if !writerGot {
+	if !writerGot.Load() {
 		t.Error("expected writer to get lock")
 	}
 }
@@ -123,15 +124,15 @@ func TestRWLock_ReadersBlockWriter(t *testing.T) {
 func TestRWLock_WriterBlocksReaders(t *testing.T) {
 	rw := NewRWLock()
 	rw.Lock(context.Background())
-	var readerGot bool
+	var readerGot atomic.Bool
 	go func() {
 		err := rw.RLock(context.Background())
-		readerGot = err == nil
+		readerGot.Store(err == nil)
 	}()
 	time.Sleep(10 * time.Millisecond)
 	rw.Unlock()
 	time.Sleep(10 * time.Millisecond)
-	if !readerGot {
+	if !readerGot.Load() {
 		t.Error("expected reader to get lock")
 	}
 }
