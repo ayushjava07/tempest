@@ -126,3 +126,26 @@ func (r *RingBuffer) ReadFrameAt(offset int) (Frame, int, error) {
 		Payload: payload,
 	}, nextOffset, nil
 }
+
+// Snapshot extracts all currently decodable frames in sequence.
+func (r *RingBuffer) Snapshot() []Frame {
+	cursor := r.NewCursor(0)
+	var frames []Frame
+
+	for {
+		f, ok, err := cursor.Next()
+		if err != nil || !ok {
+			break
+		}
+		frames = append(frames, f)
+	}
+
+	return frames
+}
+
+// Stats returns internal operational metrics.
+func (r *RingBuffer) Stats() (capacity int, writePos int, nextSeq uint64, totalBytes uint64) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.capacity, r.writePos, r.nextSeq, r.totalBytes
+}

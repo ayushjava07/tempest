@@ -160,3 +160,23 @@ func TestRingBuffer_ConcurrentProducersAndConsumers(t *testing.T) {
 		t.Fatalf("expected %d frames, got %d", numProducers*framesPerProducer, count)
 	}
 }
+
+func TestRingBuffer_Snapshot(t *testing.T) {
+	ring := New(1024)
+	_, _ = ring.Append([]byte("snap-1"))
+	_, _ = ring.Append([]byte("snap-2"))
+	_, _ = ring.Append([]byte("snap-3"))
+
+	frames := ring.Snapshot()
+	if len(frames) != 3 {
+		t.Fatalf("expected 3 snapshot frames, got %d", len(frames))
+	}
+	if string(frames[0].Payload) != "snap-1" || string(frames[2].Payload) != "snap-3" {
+		t.Fatalf("snapshot payload mismatch: %+v", frames)
+	}
+
+	cap, pos, nextSeq, totalBytes := ring.Stats()
+	if cap != 1024 || nextSeq != 4 || totalBytes == 0 || pos == 0 {
+		t.Fatalf("stats anomaly: cap=%d pos=%d nextSeq=%d totalBytes=%d", cap, pos, nextSeq, totalBytes)
+	}
+}
