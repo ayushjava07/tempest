@@ -3,6 +3,7 @@ package mmapring
 import (
 	"bytes"
 	"fmt"
+	"sync"
 	"testing"
 
 	"go.uber.org/goleak"
@@ -117,5 +118,45 @@ func TestRingBuffer_CursorExpiration(t *testing.T) {
 	_, _, err = cursor.Next()
 	if err != ErrCursorExpired && err != ErrInvalidMagic {
 		t.Fatalf("expected ErrCursorExpired or ErrInvalidMagic on overwritten buffer, got: %v", err)
+	}
+}
+
+func TestRingBuffer_ConcurrentProducersAndConsumers(t *testing.T) {
+	ring := New(64 * 1024)
+
+	var wg sync.WaitGroup
+	const numProducers = 4
+	const framesPerProducer = 25
+
+	// Producers
+	for p := 0; p < numProducers; p++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < framesPerProducer; i++ {
+				payload := []byte(fmt.Sprintf("producer-%d-frame-%d", id, i))
+				_, err := ring.Append(payload)
+				if err != nil {
+					t.Errorf("Append failed: %v", err)
+				}
+			}
+		}(p)
+	}
+
+	wg.Wait()
+
+	// Consumer verifies total frames written
+	cursor := ring.NewCursor(0)
+	var count int
+	for {
+		_, ok, err := cursor.Next()
+		if err != nil || !ok {
+			break
+		}
+		count++
+	}
+
+	if count != numProducers*framesPerProducer {
+		t.Fatalf("expected %d frames, got %d", numProducers*framesPerProducer, count)
 	}
 }
