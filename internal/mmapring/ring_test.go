@@ -72,3 +72,50 @@ func TestRingBuffer_AppendAndWrapAround(t *testing.T) {
 		t.Fatalf("expected no more frames, ok=%v err=%v", ok, err)
 	}
 }
+
+func TestRingBuffer_ChecksumCorruption(t *testing.T) {
+	ring := New(200)
+
+	payload := []byte("critical-financial-transaction")
+	_, err := ring.Append(payload)
+	if err != nil {
+		t.Fatalf("Append failed: %v", err)
+	}
+
+	// Corrupt payload byte inside ring buffer
+	ring.mu.Lock()
+	ring.data[HeaderSize+2] ^= 0xFF
+	ring.mu.Unlock()
+
+	_, _, err = ring.ReadFrameAt(0)
+	if err != ErrChecksumFailed {
+		t.Fatalf("expected ErrChecksumFailed for corrupted payload, got: %v", err)
+	}
+}
+
+func TestRingBuffer_CursorExpiration(t *testing.T) {
+	// Tiny ring buffer (50 bytes)
+	ring := New(50)
+	cursor := ring.NewCursor(0)
+
+	// Write frame 1
+	_, _ = ring.Append([]byte("A"))
+
+	// Consume frame 1
+	f, ok, err := cursor.Next()
+	if err != nil || !ok || f.Header.Seq != 1 {
+		t.Fatalf("failed to read frame 1: ok=%v err=%v", ok, err)
+	}
+
+	// Overwrite ring buffer several times so old offset now contains newer sequence
+	for i := 0; i < 5; i++ {
+		_, _ = ring.Append([]byte("B"))
+	}
+
+	// Attempting to read old cursor position after wrap-around detects corruption/expiration
+	cursor.lastSeq = 100 // artificially set high last sequence
+	_, _, err = cursor.Next()
+	if err != ErrCursorExpired && err != ErrInvalidMagic {
+		t.Fatalf("expected ErrCursorExpired or ErrInvalidMagic on overwritten buffer, got: %v", err)
+	}
+}
