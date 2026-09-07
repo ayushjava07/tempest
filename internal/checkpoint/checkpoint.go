@@ -2,192 +2,118 @@ package checkpoint
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
-	"hash/crc32"
 	"sync"
 	"time"
 )
 
-var (
-	ErrCorruptCheckpoint  = errors.New("checkpoint: data integrity check failed (CRC32 mismatch)")
-	ErrNonMonotonicSeq    = errors.New("checkpoint: sequence number must be strictly monotonic")
-	ErrCheckpointNotFound = errors.New("checkpoint: no checkpoint found for run")
-	ErrInvalidRunID       = errors.New("checkpoint: run ID cannot be empty")
-)
+type State map[string]any
 
-// Checkpoint represents a durable snapshot of workflow run progress at a step boundary.
 type Checkpoint struct {
 	ID        string
-	Namespace string
-	RunID     string
-	StepID    string
-	Sequence  uint64
-	State     []byte
-	Checksum  uint32
-	Metadata  map[string]string
-	CreatedAt time.Time
+	Name      string
+	State     State
+	Timestamp time.Time
 }
 
-// ComputeChecksum calculates the CRC32 IEEE checksum of the checkpoint state buffer.
-func ComputeChecksum(data []byte) uint32 {
-	return crc32.ChecksumIEEE(data)
-}
-
-// Validate verifies that the stored Checksum matches the CRC32 of the State bytes.
-func (c *Checkpoint) Validate() error {
-	expected := ComputeChecksum(c.State)
-	if c.Checksum != expected {
-		return fmt.Errorf("%w: expected 0x%08x, got 0x%08x", ErrCorruptCheckpoint, expected, c.Checksum)
-	}
-	return nil
-}
-
-// Store persists and retrieves checkpoints.
 type Store interface {
 	Save(ctx context.Context, cp *Checkpoint) error
-	GetLatest(ctx context.Context, namespace, runID string) (*Checkpoint, error)
-	List(ctx context.Context, namespace, runID string) ([]*Checkpoint, error)
-	Prune(ctx context.Context, namespace, runID string, keepLatest int) (int, error)
+	Load(ctx context.Context, id string) (*Checkpoint, error)
+	List(ctx context.Context) ([]*Checkpoint, error)
+	Delete(ctx context.Context, id string) error
 }
 
-// MemoryStore provides a thread-safe in-memory Store implementation.
 type MemoryStore struct {
 	mu          sync.RWMutex
-	checkpoints map[string][]*Checkpoint // key: namespace:runID
+	checkpoints map[string]*Checkpoint
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		checkpoints: make(map[string][]*Checkpoint),
+		checkpoints: make(map[string]*Checkpoint),
 	}
 }
 
-func (s *MemoryStore) key(namespace, runID string) string {
-	return fmt.Sprintf("%s:%s", namespace, runID)
-}
-
-func (s *MemoryStore) Save(ctx context.Context, cp *Checkpoint) error {
-	if cp == nil || cp.RunID == "" {
-		return ErrInvalidRunID
-	}
-	if err := cp.Validate(); err != nil {
-		return err
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	k := s.key(cp.Namespace, cp.RunID)
-	history := s.checkpoints[k]
-	if len(history) > 0 {
-		last := history[len(history)-1]
-		if cp.Sequence <= last.Sequence {
-			return fmt.Errorf("%w: proposed %d <= previous %d", ErrNonMonotonicSeq, cp.Sequence, last.Sequence)
-		}
-	}
-
-	if cp.CreatedAt.IsZero() {
-		cp.CreatedAt = time.Now().UTC()
-	}
-
-	// Store copy
-	cpCopy := *cp
-	cpCopy.State = append([]byte(nil), cp.State...)
-	s.checkpoints[k] = append(s.checkpoints[k], &cpCopy)
+func (ms *MemoryStore) Save(ctx context.Context, cp *Checkpoint) error {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	ms.checkpoints[cp.ID] = cp
 	return nil
 }
 
-func (s *MemoryStore) GetLatest(ctx context.Context, namespace, runID string) (*Checkpoint, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	k := s.key(namespace, runID)
-	history := s.checkpoints[k]
-	if len(history) == 0 {
-		return nil, ErrCheckpointNotFound
+func (ms *MemoryStore) Load(ctx context.Context, id string) (*Checkpoint, error) {
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+	cp, ok := ms.checkpoints[id]
+	if !ok {
+		return nil, fmt.Errorf("not found: %s", id)
 	}
-
-	latest := history[len(history)-1]
-	out := *latest
-	out.State = append([]byte(nil), latest.State...)
-	return &out, nil
+	return cp, nil
 }
 
-func (s *MemoryStore) List(ctx context.Context, namespace, runID string) ([]*Checkpoint, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	k := s.key(namespace, runID)
-	history := s.checkpoints[k]
-	out := make([]*Checkpoint, len(history))
-	for i, cp := range history {
-		c := *cp
-		c.State = append([]byte(nil), cp.State...)
-		out[i] = &c
+func (ms *MemoryStore) List(ctx context.Context) ([]*Checkpoint, error) {
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+	result := make([]*Checkpoint, 0, len(ms.checkpoints))
+	for _, cp := range ms.checkpoints {
+		result = append(result, cp)
 	}
-	return out, nil
+	return result, nil
 }
 
-func (s *MemoryStore) Prune(ctx context.Context, namespace, runID string, keepLatest int) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if keepLatest <= 0 {
-		keepLatest = 1
-	}
-
-	k := s.key(namespace, runID)
-	history := s.checkpoints[k]
-	if len(history) <= keepLatest {
-		return 0, nil
-	}
-
-	pruneCount := len(history) - keepLatest
-	s.checkpoints[k] = history[pruneCount:]
-	return pruneCount, nil
+func (ms *MemoryStore) Delete(ctx context.Context, id string) error {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	delete(ms.checkpoints, id)
+	return nil
 }
 
-// Engine coordinates creating and restoring checkpoints for workflow executions.
-type Engine struct {
+type Manager struct {
 	store Store
 }
 
-func NewEngine(store Store) *Engine {
-	return &Engine{store: store}
+func NewManager(store Store) *Manager {
+	return &Manager{store: store}
 }
 
-// CheckpointRun records a new execution state snapshot.
-func (e *Engine) CheckpointRun(ctx context.Context, namespace, runID, stepID string, seq uint64, state []byte, metadata map[string]string) (*Checkpoint, error) {
+func (m *Manager) Create(ctx context.Context, name string, state State) (*Checkpoint, error) {
 	cp := &Checkpoint{
-		ID:        fmt.Sprintf("cp-%s-%d", runID, seq),
-		Namespace: namespace,
-		RunID:     runID,
-		StepID:    stepID,
-		Sequence:  seq,
+		ID:        fmt.Sprintf("cp-%d", time.Now().UnixNano()),
+		Name:      name,
 		State:     state,
-		Checksum:  ComputeChecksum(state),
-		Metadata:  metadata,
-		CreatedAt: time.Now().UTC(),
+		Timestamp: time.Now(),
 	}
-
-	if err := e.store.Save(ctx, cp); err != nil {
-		return nil, fmt.Errorf("store checkpoint: %w", err)
+	if err := m.store.Save(ctx, cp); err != nil {
+		return nil, err
 	}
-
 	return cp, nil
 }
 
-// RestoreLatest retrieves and verifies the most recent valid checkpoint for a run.
-func (e *Engine) RestoreLatest(ctx context.Context, namespace, runID string) (*Checkpoint, error) {
-	cp, err := e.store.GetLatest(ctx, namespace, runID)
+func (m *Manager) Restore(ctx context.Context, id string) (State, error) {
+	cp, err := m.store.Load(ctx, id)
 	if err != nil {
 		return nil, err
 	}
+	return cp.State, nil
+}
 
-	if err := cp.Validate(); err != nil {
-		return nil, fmt.Errorf("corrupted checkpoint restored: %w", err)
+func (m *Manager) List(ctx context.Context) ([]*Checkpoint, error) {
+	return m.store.List(ctx)
+}
+
+func (m *Manager) Delete(ctx context.Context, id string) error {
+	return m.store.Delete(ctx, id)
+}
+
+func (cp *Checkpoint) Serialize() ([]byte, error) {
+	return json.Marshal(cp)
+}
+
+func Deserialize(data []byte) (*Checkpoint, error) {
+	var cp Checkpoint
+	if err := json.Unmarshal(data, &cp); err != nil {
+		return nil, err
 	}
-
-	return cp, nil
+	return &cp, nil
 }

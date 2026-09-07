@@ -1,180 +1,173 @@
 package dag
 
 import (
-	"errors"
 	"fmt"
-	"sort"
 	"sync"
 )
 
-var (
-	ErrCycleDetected = errors.New("cycle detected in graph")
-	ErrNodeNotFound  = errors.New("node not found in graph")
-	ErrDuplicateNode = errors.New("node already exists in graph")
-)
-
-// Node represents a vertex in the DAG.
-type Node struct {
-	ID       string
-	Metadata map[string]interface{}
+type Edge struct {
+	From string
+	To   string
 }
 
-// Graph represents a thread-safe directed acyclic graph.
 type Graph struct {
-	mu        sync.RWMutex
-	nodes     map[string]*Node
-	edges     map[string][]string // from -> []to (downstream)
-	inDegrees map[string]int      // node -> count of upstream dependencies
-	upstreams map[string][]string // to -> []from (upstream)
+	mu       sync.RWMutex
+	nodes    map[string]bool
+	edges    map[string][]string
+	reverse  map[string][]string
 }
 
-// New creates a new empty DAG.
 func New() *Graph {
 	return &Graph{
-		nodes:     make(map[string]*Node),
-		edges:     make(map[string][]string),
-		inDegrees: make(map[string]int),
-		upstreams: make(map[string][]string),
+		nodes:   make(map[string]bool),
+		edges:   make(map[string][]string),
+		reverse: make(map[string][]string),
 	}
 }
 
-// AddNode adds a new node to the graph.
-func (g *Graph) AddNode(id string, metadata map[string]interface{}) error {
+func (g *Graph) AddNode(name string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-
-	if _, exists := g.nodes[id]; exists {
-		return fmt.Errorf("%w: %s", ErrDuplicateNode, id)
+	g.nodes[name] = true
+	if g.edges[name] == nil {
+		g.edges[name] = nil
 	}
-
-	if metadata == nil {
-		metadata = make(map[string]interface{})
+	if g.reverse[name] == nil {
+		g.reverse[name] = nil
 	}
-
-	g.nodes[id] = &Node{ID: id, Metadata: metadata}
-	g.edges[id] = make([]string, 0)
-	g.upstreams[id] = make([]string, 0)
-	g.inDegrees[id] = 0
-	return nil
 }
 
-// AddEdge adds a directed dependency edge from 'from' to 'to'.
-// 'to' depends on 'from' (i.e. 'from' must execute before 'to').
+func (g *Graph) RemoveNode(name string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.nodes, name)
+	for _, from := range g.reverse[name] {
+		g.removeEdge(from, name)
+	}
+	for _, to := range g.edges[name] {
+		g.removeEdge(name, to)
+	}
+	delete(g.edges, name)
+	delete(g.reverse, name)
+}
+
+func (g *Graph) removeEdge(from, to string) {
+	edges := g.edges[from]
+	for i, e := range edges {
+		if e == to {
+			g.edges[from] = append(edges[:i], edges[i+1:]...)
+			break
+		}
+	}
+	rev := g.reverse[to]
+	for i, e := range rev {
+		if e == from {
+			g.reverse[to] = append(rev[:i], rev[i+1:]...)
+			break
+		}
+	}
+}
+
 func (g *Graph) AddEdge(from, to string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-
-	if _, exists := g.nodes[from]; !exists {
-		return fmt.Errorf("%w: %s", ErrNodeNotFound, from)
+	if !g.nodes[from] || !g.nodes[to] {
+		return fmt.Errorf("node not found")
 	}
-	if _, exists := g.nodes[to]; !exists {
-		return fmt.Errorf("%w: %s", ErrNodeNotFound, to)
+	if g.hasPath(to, from) {
+		return fmt.Errorf("would create cycle")
 	}
-	if from == to {
-		return ErrCycleDetected
-	}
-
-	for _, existing := range g.edges[from] {
-		if existing == to {
-			return nil
-		}
-	}
-
 	g.edges[from] = append(g.edges[from], to)
-	g.upstreams[to] = append(g.upstreams[to], from)
-	g.inDegrees[to]++
+	g.reverse[to] = append(g.reverse[to], from)
 	return nil
 }
 
-// NodeCount returns the total number of nodes in the graph.
-func (g *Graph) NodeCount() int {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	return len(g.nodes)
-}
-
-// HasNode checks if a node exists.
-func (g *Graph) HasNode(id string) bool {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	_, exists := g.nodes[id]
-	return exists
-}
-
-// Upstreams returns all direct upstream node IDs for the given node.
-func (g *Graph) Upstreams(id string) ([]string, error) {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-
-	if _, exists := g.nodes[id]; !exists {
-		return nil, fmt.Errorf("%w: %s", ErrNodeNotFound, id)
+func (g *Graph) hasPath(from, to string) bool {
+	visited := make(map[string]bool)
+	stack := []string{from}
+	for len(stack) > 0 {
+		current := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if current == to {
+			return true
+		}
+		if visited[current] {
+			continue
+		}
+		visited[current] = true
+		for _, next := range g.edges[current] {
+			stack = append(stack, next)
+		}
 	}
-	res := make([]string, len(g.upstreams[id]))
-	copy(res, g.upstreams[id])
-	sort.Strings(res)
-	return res, nil
+	return false
 }
 
-// Downstreams returns all direct downstream node IDs for the given node.
-func (g *Graph) Downstreams(id string) ([]string, error) {
+func (g *Graph) RemoveEdge(from, to string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.removeEdge(from, to)
+}
+
+func (g *Graph) HasNode(name string) bool {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-
-	if _, exists := g.nodes[id]; !exists {
-		return nil, fmt.Errorf("%w: %s", ErrNodeNotFound, id)
-	}
-	res := make([]string, len(g.edges[id]))
-	copy(res, g.edges[id])
-	sort.Strings(res)
-	return res, nil
+	return g.nodes[name]
 }
 
-// TopologicalSort performs Kahn's algorithm to return a valid execution order.
-// If the graph contains any cycle, ErrCycleDetected is returned.
+func (g *Graph) Nodes() []string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	result := make([]string, 0, len(g.nodes))
+	for n := range g.nodes {
+		result = append(result, n)
+	}
+	return result
+}
+
 func (g *Graph) TopologicalSort() ([]string, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-
-	inDegree := make(map[string]int, len(g.nodes))
-	for id, deg := range g.inDegrees {
-		inDegree[id] = deg
+	inDegree := make(map[string]int)
+	for n := range g.nodes {
+		inDegree[n] = 0
 	}
-
-	queue := make([]string, 0)
-	for id, deg := range inDegree {
-		if deg == 0 {
-			queue = append(queue, id)
+	for _, toList := range g.edges {
+		for _, to := range toList {
+			inDegree[to]++
 		}
 	}
-	sort.Strings(queue)
-
-	result := make([]string, 0, len(g.nodes))
-
+	var queue []string
+	for n, deg := range inDegree {
+		if deg == 0 {
+			queue = append(queue, n)
+		}
+	}
+	var result []string
 	for len(queue) > 0 {
-		curr := queue[0]
+		node := queue[0]
 		queue = queue[1:]
-		result = append(result, curr)
-
-		nextNodes := make([]string, 0)
-		for _, next := range g.edges[curr] {
-			inDegree[next]--
-			if inDegree[next] == 0 {
-				nextNodes = append(nextNodes, next)
+		result = append(result, node)
+		for _, to := range g.edges[node] {
+			inDegree[to]--
+			if inDegree[to] == 0 {
+				queue = append(queue, to)
 			}
 		}
-		sort.Strings(nextNodes)
-		queue = append(queue, nextNodes...)
 	}
-
 	if len(result) != len(g.nodes) {
-		return nil, ErrCycleDetected
+		return nil, fmt.Errorf("cycle detected")
 	}
-
 	return result, nil
 }
 
-// Validate checks that the graph has no cycles and contains at least one root node.
-func (g *Graph) Validate() error {
-	_, err := g.TopologicalSort()
-	return err
+func (g *Graph) Dependents(node string) []string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return append([]string{}, g.edges[node]...)
+}
+
+func (g *Graph) Dependencies(node string) []string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return append([]string{}, g.reverse[node]...)
 }

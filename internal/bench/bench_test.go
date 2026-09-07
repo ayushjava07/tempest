@@ -24,7 +24,7 @@ func BenchmarkStateMachine_LegalTransition(b *testing.B) {
 func BenchmarkDAG_TopologicalSort_10Nodes(b *testing.B) {
 	g := dag.New()
 	for i := 0; i < 10; i++ {
-		_ = g.AddNode(fmt.Sprintf("n%d", i), nil)
+		g.AddNode(fmt.Sprintf("n%d", i))
 	}
 	for i := 0; i < 9; i++ {
 		_ = g.AddEdge(fmt.Sprintf("n%d", i), fmt.Sprintf("n%d", i+1))

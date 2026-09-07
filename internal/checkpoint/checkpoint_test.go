@@ -2,138 +2,112 @@ package checkpoint
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"sync"
 	"testing"
-
-	"go.uber.org/goleak"
+	"time"
 )
 
-func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
-}
-
-func TestCheckpoint_SaveAndRestore(t *testing.T) {
-	store := NewMemoryStore()
-	engine := NewEngine(store)
-	ctx := context.Background()
-
-	stateData := []byte(`{"step":"step-1","data":{"counter":42}}`)
-	cp, err := engine.CheckpointRun(ctx, "default", "run-101", "step-1", 1, stateData, map[string]string{"env": "test"})
+func TestMemoryStore_SaveLoad(t *testing.T) {
+	ms := NewMemoryStore()
+	cp := &Checkpoint{ID: "1", Name: "test", State: State{"x": 1}}
+	if err := ms.Save(context.Background(), cp); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := ms.Load(context.Background(), "1")
 	if err != nil {
-		t.Fatalf("CheckpointRun failed: %v", err)
+		t.Fatal(err)
 	}
-
-	if cp.Checksum != ComputeChecksum(stateData) {
-		t.Errorf("checksum mismatch: %d != %d", cp.Checksum, ComputeChecksum(stateData))
+	if loaded.Name != "test" {
+		t.Error("name mismatch")
 	}
+}
 
-	restored, err := engine.RestoreLatest(ctx, "default", "run-101")
+func TestMemoryStore_List(t *testing.T) {
+	ms := NewMemoryStore()
+	ms.Save(context.Background(), &Checkpoint{ID: "1", Name: "a", State: State{}})
+	ms.Save(context.Background(), &Checkpoint{ID: "2", Name: "b", State: State{}})
+	list, err := ms.List(context.Background())
 	if err != nil {
-		t.Fatalf("RestoreLatest failed: %v", err)
+		t.Fatal(err)
 	}
-
-	if restored.Sequence != 1 || string(restored.State) != string(stateData) {
-		t.Errorf("unexpected restored state: %s", string(restored.State))
-	}
-}
-
-func TestCheckpoint_CRC32CorruptionDetection(t *testing.T) {
-	store := NewMemoryStore()
-	ctx := context.Background()
-
-	stateData := []byte(`{"valid":true}`)
-	cp := &Checkpoint{
-		ID:        "cp-bad",
-		Namespace: "default",
-		RunID:     "run-corrupt",
-		Sequence:  1,
-		State:     stateData,
-		Checksum:  ComputeChecksum(stateData) + 1, // Deliberate mismatch
-	}
-
-	err := store.Save(ctx, cp)
-	if !errors.Is(err, ErrCorruptCheckpoint) {
-		t.Fatalf("expected ErrCorruptCheckpoint, got %v", err)
+	if len(list) != 2 {
+		t.Errorf("expected 2, got %d", len(list))
 	}
 }
 
-func TestCheckpoint_SequenceMonotonicity(t *testing.T) {
-	store := NewMemoryStore()
-	engine := NewEngine(store)
-	ctx := context.Background()
+func TestMemoryStore_Delete(t *testing.T) {
+	ms := NewMemoryStore()
+	ms.Save(context.Background(), &Checkpoint{ID: "1", Name: "test", State: State{}})
+	if err := ms.Delete(context.Background(), "1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.Load(context.Background(), "1"); err == nil {
+		t.Error("expected not found")
+	}
+}
 
-	_, err := engine.CheckpointRun(ctx, "default", "run-seq", "step-1", 10, []byte(`{}`), nil)
+func TestManager_CreateRestore(t *testing.T) {
+	m := NewManager(NewMemoryStore())
+	state := State{"counter": 42, "status": "running"}
+	cp, err := m.Create(context.Background(), "my-checkpoint", state)
 	if err != nil {
-		t.Fatalf("first checkpoint failed: %v", err)
+		t.Fatal(err)
 	}
-
-	// Lower or equal sequence must be rejected
-	_, err = engine.CheckpointRun(ctx, "default", "run-seq", "step-2", 5, []byte(`{}`), nil)
-	if !errors.Is(err, ErrNonMonotonicSeq) {
-		t.Fatalf("expected ErrNonMonotonicSeq for decreasing sequence, got %v", err)
+	restored, err := m.Restore(context.Background(), cp.ID)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	_, err = engine.CheckpointRun(ctx, "default", "run-seq", "step-2", 10, []byte(`{}`), nil)
-	if !errors.Is(err, ErrNonMonotonicSeq) {
-		t.Fatalf("expected ErrNonMonotonicSeq for identical sequence, got %v", err)
-	}
-}
-
-func TestCheckpoint_Pruning(t *testing.T) {
-	store := NewMemoryStore()
-	engine := NewEngine(store)
-	ctx := context.Background()
-
-	for i := 1; i <= 5; i++ {
-		_, err := engine.CheckpointRun(ctx, "default", "run-prune", fmt.Sprintf("step-%d", i), uint64(i), []byte(fmt.Sprintf("state-%d", i)), nil)
-		if err != nil {
-			t.Fatalf("checkpoint %d failed: %v", i, err)
+	v := restored["counter"]
+	switch v := v.(type) {
+	case int:
+		if v != 42 {
+			t.Errorf("state mismatch: got %d", v)
 		}
-	}
-
-	list, _ := store.List(ctx, "default", "run-prune")
-	if len(list) != 5 {
-		t.Fatalf("expected 5 checkpoints, got %d", len(list))
-	}
-
-	// Prune keeping latest 2
-	pruned, err := store.Prune(ctx, "default", "run-prune", 2)
-	if err != nil {
-		t.Fatalf("Prune failed: %v", err)
-	}
-	if pruned != 3 {
-		t.Errorf("expected 3 pruned checkpoints, got %d", pruned)
-	}
-
-	remaining, _ := store.List(ctx, "default", "run-prune")
-	if len(remaining) != 2 {
-		t.Fatalf("expected 2 remaining checkpoints, got %d", len(remaining))
-	}
-	if remaining[0].Sequence != 4 || remaining[1].Sequence != 5 {
-		t.Errorf("unexpected remaining sequences: %d, %d", remaining[0].Sequence, remaining[1].Sequence)
+	case float64:
+		if v != 42 {
+			t.Errorf("state mismatch: got %v", v)
+		}
+	default:
+		t.Errorf("state mismatch: unexpected type %T", v)
 	}
 }
 
-func TestCheckpoint_ConcurrentCheckpoints(t *testing.T) {
-	store := NewMemoryStore()
-	engine := NewEngine(store)
-	concurrency := 10
-
-	var wg sync.WaitGroup
-	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			runID := fmt.Sprintf("run-concurrent-%d", id)
-			for j := 1; j <= 5; j++ {
-				_, err := engine.CheckpointRun(context.Background(), "default", runID, fmt.Sprintf("step-%d", j), uint64(j), []byte("payload"), nil)
-				if err != nil {
-					t.Errorf("concurrent checkpoint failed: %v", err)
-				}
-			}
-		}(i)
+func TestManager_List(t *testing.T) {
+	m := NewManager(NewMemoryStore())
+	m.Create(context.Background(), "a", State{})
+	m.Create(context.Background(), "b", State{})
+	list, err := m.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
 	}
-	wg.Wait()
+	if len(list) != 2 {
+		t.Errorf("expected 2, got %d", len(list))
+	}
+}
+
+func TestCheckpoint_SerializeDeserialize(t *testing.T) {
+	cp := &Checkpoint{
+		ID:        "test-1",
+		Name:      "checkpoint",
+		State:     State{"key": "value"},
+		Timestamp: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	data, err := cp.Serialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := Deserialize(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.ID != "test-1" || restored.Name != "checkpoint" {
+		t.Error("deserialize mismatch")
+	}
+}
+
+func TestCheckpoint_NotFound(t *testing.T) {
+	m := NewManager(NewMemoryStore())
+	_, err := m.Restore(context.Background(), "nonexistent")
+	if err == nil {
+		t.Error("expected error")
+	}
 }

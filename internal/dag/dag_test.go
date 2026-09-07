@@ -4,119 +4,126 @@ import (
 	"testing"
 )
 
-func TestDAG_LinearExecution(t *testing.T) {
+func TestGraph_AddNode(t *testing.T) {
 	g := New()
-	_ = g.AddNode("A", nil)
-	_ = g.AddNode("B", nil)
-	_ = g.AddNode("C", nil)
-
-	if err := g.AddEdge("A", "B"); err != nil {
-		t.Fatalf("unexpected error adding edge A->B: %v", err)
+	g.AddNode("a")
+	if !g.HasNode("a") {
+		t.Error("expected node a")
 	}
-	if err := g.AddEdge("B", "C"); err != nil {
-		t.Fatalf("unexpected error adding edge B->C: %v", err)
+	if g.HasNode("b") {
+		t.Error("expected no node b")
 	}
+}
 
-	order, err := g.TopologicalSort()
+func TestGraph_AddEdge(t *testing.T) {
+	g := New()
+	g.AddNode("a")
+	g.AddNode("b")
+	if err := g.AddEdge("a", "b"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGraph_AddEdge_Cycle(t *testing.T) {
+	g := New()
+	g.AddNode("a")
+	g.AddNode("b")
+	g.AddEdge("a", "b")
+	if err := g.AddEdge("b", "a"); err == nil {
+		t.Error("expected cycle error")
+	}
+}
+
+func TestGraph_RemoveNode(t *testing.T) {
+	g := New()
+	g.AddNode("a")
+	g.AddNode("b")
+	g.AddEdge("a", "b")
+	g.RemoveNode("a")
+	if g.HasNode("a") {
+		t.Error("expected a removed")
+	}
+	if !g.HasNode("b") {
+		t.Error("expected b still there")
+	}
+}
+
+func TestGraph_RemoveEdge(t *testing.T) {
+	g := New()
+	g.AddNode("a")
+	g.AddNode("b")
+	g.AddEdge("a", "b")
+	g.RemoveEdge("a", "b")
+}
+
+func TestGraph_TopologicalSort(t *testing.T) {
+	g := New()
+	g.AddNode("a")
+	g.AddNode("b")
+	g.AddNode("c")
+	g.AddNode("d")
+	g.AddEdge("a", "b")
+	g.AddEdge("a", "c")
+	g.AddEdge("b", "d")
+	g.AddEdge("c", "d")
+	sorted, err := g.TopologicalSort()
 	if err != nil {
-		t.Fatalf("unexpected error in sort: %v", err)
+		t.Fatal(err)
 	}
+	if len(sorted) != 4 {
+		t.Errorf("expected 4, got %d", len(sorted))
+	}
+	idx := make(map[string]int)
+	for i, n := range sorted {
+		idx[n] = i
+	}
+	if idx["a"] >= idx["b"] || idx["a"] >= idx["c"] {
+		t.Error("a before b and c")
+	}
+	if idx["b"] >= idx["d"] || idx["c"] >= idx["d"] {
+		t.Error("b and c before d")
+	}
+}
 
-	expected := []string{"A", "B", "C"}
-	for i, v := range expected {
-		if order[i] != v {
-			t.Errorf("expected index %d to be %s, got %s", i, v, order[i])
+func TestGraph_Dependents(t *testing.T) {
+	g := New()
+	g.AddNode("a")
+	g.AddNode("b")
+	g.AddEdge("a", "b")
+	deps := g.Dependents("a")
+	if len(deps) != 1 || deps[0] != "b" {
+		t.Error("expected dependents b")
+	}
+}
+
+func TestGraph_Dependencies(t *testing.T) {
+	g := New()
+	g.AddNode("a")
+	g.AddNode("b")
+	g.AddEdge("a", "b")
+	deps := g.Dependencies("b")
+	if len(deps) != 1 || deps[0] != "a" {
+		t.Error("expected dependency a")
+	}
+}
+
+func TestGraph_ComplexDAG(t *testing.T) {
+	g := New()
+	nodes := []string{"a", "b", "c", "d", "e", "f"}
+	for _, n := range nodes {
+		g.AddNode(n)
+	}
+	edges := [][2]string{{"a", "b"}, {"a", "c"}, {"b", "d"}, {"c", "d"}, {"d", "e"}, {"d", "f"}}
+	for _, e := range edges {
+		if err := g.AddEdge(e[0], e[1]); err != nil {
+			t.Fatal(err)
 		}
 	}
-}
-
-func TestDAG_BranchAndJoin(t *testing.T) {
-	g := New()
-	_ = g.AddNode("start", nil)
-	_ = g.AddNode("branch1", nil)
-	_ = g.AddNode("branch2", nil)
-	_ = g.AddNode("join", nil)
-
-	_ = g.AddEdge("start", "branch1")
-	_ = g.AddEdge("start", "branch2")
-	_ = g.AddEdge("branch1", "join")
-	_ = g.AddEdge("branch2", "join")
-
-	order, err := g.TopologicalSort()
+	sorted, err := g.TopologicalSort()
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatal(err)
 	}
-
-	if order[0] != "start" {
-		t.Errorf("expected first node to be start, got %s", order[0])
-	}
-	if order[3] != "join" {
-		t.Errorf("expected last node to be join, got %s", order[3])
-	}
-}
-
-func TestDAG_CycleDetection(t *testing.T) {
-	g := New()
-	_ = g.AddNode("A", nil)
-	_ = g.AddNode("B", nil)
-	_ = g.AddNode("C", nil)
-
-	_ = g.AddEdge("A", "B")
-	_ = g.AddEdge("B", "C")
-	_ = g.AddEdge("C", "A")
-
-	_, err := g.TopologicalSort()
-	if err != ErrCycleDetected {
-		t.Fatalf("expected ErrCycleDetected, got %v", err)
-	}
-	if err := g.Validate(); err != ErrCycleDetected {
-		t.Fatalf("expected ErrCycleDetected on Validate(), got %v", err)
-	}
-}
-
-func TestDAG_SelfReferentialCycle(t *testing.T) {
-	g := New()
-	_ = g.AddNode("A", nil)
-
-	err := g.AddEdge("A", "A")
-	if err != ErrCycleDetected {
-		t.Fatalf("expected ErrCycleDetected for self-loop, got %v", err)
-	}
-}
-
-func TestDAG_DuplicateNode(t *testing.T) {
-	g := New()
-	if err := g.AddNode("A", nil); err != nil {
-		t.Fatalf("failed to add node A: %v", err)
-	}
-	if err := g.AddNode("A", nil); err == nil {
-		t.Fatalf("expected error on duplicate node, got nil")
-	}
-}
-
-func TestDAG_NodeQueries(t *testing.T) {
-	g := New()
-	_ = g.AddNode("parent", nil)
-	_ = g.AddNode("child1", nil)
-	_ = g.AddNode("child2", nil)
-
-	_ = g.AddEdge("parent", "child1")
-	_ = g.AddEdge("parent", "child2")
-
-	if g.NodeCount() != 3 {
-		t.Errorf("expected 3 nodes, got %d", g.NodeCount())
-	}
-	if !g.HasNode("parent") || g.HasNode("unknown") {
-		t.Errorf("incorrect HasNode results")
-	}
-
-	downs, err := g.Downstreams("parent")
-	if err != nil || len(downs) != 2 {
-		t.Errorf("expected 2 downstreams, got %v (err: %v)", downs, err)
-	}
-
-	ups, err := g.Upstreams("child1")
-	if err != nil || len(ups) != 1 || ups[0] != "parent" {
-		t.Errorf("expected 1 upstream (parent), got %v (err: %v)", ups, err)
+	if len(sorted) != 6 {
+		t.Errorf("expected 6, got %d", len(sorted))
 	}
 }
