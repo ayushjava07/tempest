@@ -181,7 +181,7 @@ func TestE2E_ConcurrentSagasIsolation(t *testing.T) {
 
 	for i := 0; i < numSagas; i++ {
 		sagaID := fmt.Sprintf("concurrent-saga-%03d", i)
-		shouldFail := (i % 2 == 0)
+		shouldFail := (i%2 == 0)
 
 		go func(id string, fail bool) {
 			defer wg.Done()
