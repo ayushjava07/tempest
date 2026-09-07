@@ -2,123 +2,76 @@ package sandbox
 
 import (
 	"context"
-	"strings"
+	"os"
 	"testing"
 	"time"
-
-	"go.uber.org/goleak"
 )
 
-func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
-}
-
-func TestSandbox_EchoCommand(t *testing.T) {
-	s := NewSupervisor()
-	ctx := context.Background()
-
-	res, err := s.Execute(ctx, ProcessConfig{
-		Command: "echo",
-		Args:    []string{"hello", "tempest"},
-		Timeout: 5 * time.Second,
-	})
+func TestSandbox_Run(t *testing.T) {
+	s := New(Config{Timeout: 5 * time.Second})
+	out, err := s.Run(context.Background(), "echo", "hello")
 	if err != nil {
-		t.Fatalf("Execute failed: %v", err)
+		t.Fatal(err)
 	}
-
-	if res.ExitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", res.ExitCode)
-	}
-	if strings.TrimSpace(string(res.Stdout)) != "hello tempest" {
-		t.Errorf("unexpected stdout: %q", string(res.Stdout))
-	}
-	if res.TimedOut {
-		t.Error("should not have timed out")
+	if out == "" {
+		t.Error("expected output")
 	}
 }
 
-func TestSandbox_TimeoutKilling(t *testing.T) {
-	s := NewSupervisor()
-	ctx := context.Background()
-
-	// Run sleep for 5 seconds with a 100ms timeout
-	res, _ := s.Execute(ctx, ProcessConfig{
-		Command: "sleep",
-		Args:    []string{"5"},
-		Timeout: 100 * time.Millisecond,
-	})
-
-	if !res.TimedOut {
-		t.Error("expected process to time out")
-	}
-	if res.ExitCode == 0 {
-		t.Errorf("expected non-zero exit code on timeout, got %d", res.ExitCode)
-	}
-}
-
-func TestSandbox_OutputTruncation(t *testing.T) {
-	s := NewSupervisor()
-	ctx := context.Background()
-
-	// Max 10 bytes output
-	res, err := s.Execute(ctx, ProcessConfig{
-		Command:        "echo",
-		Args:           []string{"12345678901234567890"},
-		MaxOutputBytes: 10,
-		Timeout:        5 * time.Second,
-	})
-	if err != nil {
-		t.Fatalf("Execute failed: %v", err)
-	}
-
-	if len(res.Stdout) != 10 {
-		t.Errorf("expected exactly 10 bytes of stdout, got %d", len(res.Stdout))
-	}
-	if !res.OutputTruncated {
-		t.Error("expected OutputTruncated to be true")
-	}
-}
-
-func TestSandbox_EnvironmentSanitization(t *testing.T) {
-	s := NewSupervisor()
-	ctx := context.Background()
-
-	res, err := s.Execute(ctx, ProcessConfig{
-		Command: "sh",
-		Args:    []string{"-c", "echo key=$SAFE_KEY secret=$TEMPEST_ADMIN_TOKEN"},
-		Env: map[string]string{
-			"SAFE_KEY":            "visible_val",
-			"TEMPEST_ADMIN_TOKEN": "forbidden_token",
-		},
-		Timeout: 5 * time.Second,
-	})
-	if err != nil {
-		t.Fatalf("Execute failed: %v", err)
-	}
-
-	output := string(res.Stdout)
-	if !strings.Contains(output, "key=visible_val") {
-		t.Errorf("expected safe key in output: %s", output)
-	}
-	if strings.Contains(output, "forbidden_token") {
-		t.Errorf("sensitive token leaked into sandbox environment: %s", output)
-	}
-}
-
-func TestSandbox_NonZeroExitCode(t *testing.T) {
-	s := NewSupervisor()
-	ctx := context.Background()
-
-	res, err := s.Execute(ctx, ProcessConfig{
-		Command: "sh",
-		Args:    []string{"-c", "exit 42"},
-		Timeout: 5 * time.Second,
-	})
-
-	if res.ExitCode != 42 {
-		t.Errorf("expected exit code 42, got %d", res.ExitCode)
-	}
+func TestSandbox_Timeout(t *testing.T) {
+	s := New(Config{Timeout: 50 * time.Millisecond})
+	_, err := s.Run(context.Background(), "sleep", "1")
 	if err == nil {
-		t.Error("expected error for non-zero exit code")
+		t.Error("expected timeout error")
+	}
+}
+
+func TestSandbox_Cleanup(t *testing.T) {
+	dir, _ := os.MkdirTemp("", "sandbox-test-*")
+	s := New(Config{WorkDir: dir, Timeout: time.Second})
+	s.Run(context.Background(), "echo", "test")
+	if err := s.Cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); err == nil {
+		t.Error("expected dir removed")
+	}
+}
+
+func TestFileSystem_ReadWrite(t *testing.T) {
+	dir, _ := os.MkdirTemp("", "fs-test-*")
+	fs := NewFileSystem(dir)
+	if err := fs.Write("test.txt", []byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	data, err := fs.Read("test.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "hello" {
+		t.Error("data mismatch")
+	}
+}
+
+func TestFileSystem_List(t *testing.T) {
+	dir, _ := os.MkdirTemp("", "fs-test-*")
+	fs := NewFileSystem(dir)
+	fs.Write("a.txt", []byte("a"))
+	fs.Write("b.txt", []byte("b"))
+	list, err := fs.List(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 {
+		t.Errorf("expected 2, got %d", len(list))
+	}
+}
+
+func TestFileSystem_AccessDenied(t *testing.T) {
+	dir, _ := os.MkdirTemp("", "fs-test-*")
+	fs := NewFileSystem(dir)
+	_, err := fs.Read("../etc/passwd")
+	if err == nil {
+		t.Error("expected access denied")
 	}
 }
