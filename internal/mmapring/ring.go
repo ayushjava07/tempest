@@ -78,3 +78,51 @@ func (r *RingBuffer) writeBytesLocked(p []byte) {
 		p = p[chunk:]
 	}
 }
+
+// ReadBytes reads n bytes starting from circular position offset.
+func (r *RingBuffer) ReadBytes(offset int, dst []byte) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	r.readBytesLocked(offset, dst)
+}
+
+func (r *RingBuffer) readBytesLocked(offset int, dst []byte) {
+	pos := offset % r.capacity
+	for len(dst) > 0 {
+		avail := r.capacity - pos
+		chunk := len(dst)
+		if chunk > avail {
+			chunk = avail
+		}
+		copy(dst[:chunk], r.data[pos:pos+chunk])
+		pos = (pos + chunk) % r.capacity
+		dst = dst[chunk:]
+	}
+}
+
+// ReadFrameAt parses and validates a frame at offset with CRC32 integrity check.
+func (r *RingBuffer) ReadFrameAt(offset int) (Frame, int, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var hdrBuf [HeaderSize]byte
+	r.readBytesLocked(offset, hdrBuf[:])
+
+	hdr, err := DecodeHeader(hdrBuf[:])
+	if err != nil {
+		return Frame{}, 0, err
+	}
+
+	payload := make([]byte, hdr.Length)
+	r.readBytesLocked(offset+HeaderSize, payload)
+
+	if ComputeChecksum(payload) != hdr.Checksum {
+		return Frame{}, 0, ErrChecksumFailed
+	}
+
+	nextOffset := (offset + HeaderSize + int(hdr.Length)) % r.capacity
+	return Frame{
+		Header:  hdr,
+		Payload: payload,
+	}, nextOffset, nil
+}
