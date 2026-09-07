@@ -15,6 +15,8 @@ func workflowsCmd() *Command {
 			workflowsGetCmd(),
 			workflowsSubmitCmd(),
 			workflowsInspectCmd(),
+			workflowsPauseCmd(),
+			workflowsResumeCmd(),
 		},
 	}
 }
