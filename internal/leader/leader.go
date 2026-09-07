@@ -1,6 +1,7 @@
 package leader
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -145,4 +146,104 @@ func (c *Candidate) Campaign() (bool, error) {
 	c.state = StateFollower
 	c.isLeader.Store(false)
 	return false, nil
+}
+
+// Start boots the continuous election and heartbeat renewal loop.
+func (c *Candidate) Start(ctx context.Context) {
+	go c.runLoop(ctx)
+}
+
+func (c *Candidate) runLoop(ctx context.Context) {
+	ticker := time.NewTicker(c.cfg.RetryInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.stopCh:
+			c.stepDown()
+			return
+		case <-ctx.Done():
+			c.stepDown()
+			return
+		case <-ticker.C:
+			c.mu.Lock()
+			isLead := (c.state == StateLeader)
+			c.mu.Unlock()
+
+			if isLead {
+				// Renew heartbeat
+				rec, renewed, err := c.coord.TryAcquireOrRenew(c.id, c.Term(), c.cfg.LeaseDuration)
+				if err != nil || !renewed {
+					c.stepDown()
+					ticker.Reset(c.cfg.RetryInterval)
+				} else {
+					c.mu.Lock()
+					c.term = rec.Term
+					c.mu.Unlock()
+					ticker.Reset(c.cfg.RenewInterval)
+				}
+			} else {
+				// Campaign for leadership
+				won, _ := c.Campaign()
+				if won {
+					c.triggerElected()
+					ticker.Reset(c.cfg.RenewInterval)
+				} else {
+					ticker.Reset(c.cfg.RetryInterval)
+				}
+			}
+		}
+	}
+}
+
+func (c *Candidate) stepDown() {
+	c.mu.Lock()
+	wasLeader := (c.state == StateLeader)
+	c.state = StateFollower
+	c.isLeader.Store(false)
+	term := c.term
+	c.mu.Unlock()
+
+	if wasLeader {
+		_ = c.coord.Release(c.id, term)
+		c.triggerRevoked()
+	}
+}
+
+func (c *Candidate) triggerElected() {
+	select {
+	case c.electedCh <- struct{}{}:
+	default:
+	}
+	c.mu.RLock()
+	callbacks := make([]func(), len(c.onElected))
+	copy(callbacks, c.onElected)
+	c.mu.RUnlock()
+	for _, cb := range callbacks {
+		cb()
+	}
+}
+
+func (c *Candidate) triggerRevoked() {
+	select {
+	case c.revokedCh <- struct{}{}:
+	default:
+	}
+	c.mu.RLock()
+	callbacks := make([]func(), len(c.onRevoked))
+	copy(callbacks, c.onRevoked)
+	c.mu.RUnlock()
+	for _, cb := range callbacks {
+		cb()
+	}
+}
+
+// Stop terminates candidate loop and releases lease.
+func (c *Candidate) Stop() {
+	select {
+	case <-c.stopCh:
+		return
+	default:
+		close(c.stopCh)
+	}
 }
