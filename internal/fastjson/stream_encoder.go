@@ -70,9 +70,9 @@ func (e *StreamEncoder) EndArray() {
 // Key writes a property key with quotes and colon: "key":
 func (e *StreamEncoder) Key(key string) {
 	e.writeSeparator()
-	e.WriteString(key)
-	e.buf.AppendByte(':')
-	// Do not insert comma between key and its value
+	e.buf.AppendByte('"')
+	EscapeString(e.buf, key)
+	e.buf.AppendString(`":`)
 	if len(e.needComma) > 0 {
 		e.needComma[len(e.needComma)-1] = false
 	}
@@ -80,6 +80,7 @@ func (e *StreamEncoder) Key(key string) {
 
 // WriteString writes an escaped string enclosed in quotes.
 func (e *StreamEncoder) WriteString(s string) {
+	e.writeSeparator()
 	e.buf.AppendByte('"')
 	EscapeString(e.buf, s)
 	e.buf.AppendByte('"')
@@ -90,6 +91,7 @@ func (e *StreamEncoder) WriteString(s string) {
 
 // WriteInt64 writes an integer.
 func (e *StreamEncoder) WriteInt64(v int64) {
+	e.writeSeparator()
 	e.buf.buf = strconv.AppendInt(e.buf.buf, v, 10)
 	if len(e.needComma) > 0 {
 		e.needComma[len(e.needComma)-1] = true
@@ -98,6 +100,7 @@ func (e *StreamEncoder) WriteInt64(v int64) {
 
 // WriteUint64 writes an unsigned integer.
 func (e *StreamEncoder) WriteUint64(v uint64) {
+	e.writeSeparator()
 	e.buf.buf = strconv.AppendUint(e.buf.buf, v, 10)
 	if len(e.needComma) > 0 {
 		e.needComma[len(e.needComma)-1] = true
@@ -106,6 +109,7 @@ func (e *StreamEncoder) WriteUint64(v uint64) {
 
 // WriteFloat64 writes a float.
 func (e *StreamEncoder) WriteFloat64(v float64) {
+	e.writeSeparator()
 	e.buf.buf = strconv.AppendFloat(e.buf.buf, v, 'f', -1, 64)
 	if len(e.needComma) > 0 {
 		e.needComma[len(e.needComma)-1] = true
@@ -114,6 +118,7 @@ func (e *StreamEncoder) WriteFloat64(v float64) {
 
 // WriteBool writes true or false.
 func (e *StreamEncoder) WriteBool(v bool) {
+	e.writeSeparator()
 	if v {
 		e.buf.AppendString("true")
 	} else {
@@ -126,6 +131,7 @@ func (e *StreamEncoder) WriteBool(v bool) {
 
 // WriteNull writes null.
 func (e *StreamEncoder) WriteNull() {
+	e.writeSeparator()
 	e.buf.AppendString("null")
 	if len(e.needComma) > 0 {
 		e.needComma[len(e.needComma)-1] = true
@@ -134,6 +140,7 @@ func (e *StreamEncoder) WriteNull() {
 
 // WriteTimeRFC3339 writes a formatted timestamp string.
 func (e *StreamEncoder) WriteTimeRFC3339(t time.Time) {
+	e.writeSeparator()
 	e.buf.AppendByte('"')
 	e.buf.buf = t.AppendFormat(e.buf.buf, time.RFC3339Nano)
 	e.buf.AppendByte('"')
