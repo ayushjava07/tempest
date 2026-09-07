@@ -8,8 +8,8 @@ Author: Ayushjava07 <ayushjhasahab07@gmail.com>
 |---|---|---|---|---|
 | Historical | Foundation through Subsystems | 0 | 86 | PASS |
 | Batch 1 | Distributed Leader Election (`internal/leader`) | 86 | 94 | PASS |
-| Batch 2 | Persistent Memory-Mapped Ring Buffer (`internal/mmapring`) | 94 | Pending | Pending |
-| Batch 3 | Workflow State Archiver (`internal/archiver`) | Pending | Pending | Pending |
+| Batch 2 | Persistent Memory-Mapped Ring Buffer (`internal/mmapring`) | 94 | 102 | PASS |
+| Batch 3 | Workflow State Archiver (`internal/archiver`) | 102 | Pending | Pending |
 | Batch 4 | Dynamic Replay & Determinism (`internal/replay`) | Pending | Pending | Pending |
 | Batch 5 | Workflow Static Analyzer (`internal/analyzer`) | Pending | Pending | Pending |
 | Batch 6 | Pluggable Secret Vault Providers (`internal/vault/providers`) | Pending | Pending | Pending |
