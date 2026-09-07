@@ -14,11 +14,9 @@ const (
 // UnreachableStepRule flags steps that cannot be executed from initial root steps.
 type UnreachableStepRule struct{}
 
-func (r UnreachableStepRule) ID() string { return RuleIDUnreachableStep }
-func (r UnreachableStepRule) Description() string {
-	return "Detects disconnected or unreachable steps in workflow DAG"
-}
-func (r UnreachableStepRule) Severity() Severity { return SeverityWarning }
+func (r UnreachableStepRule) ID() string          { return RuleIDUnreachableStep }
+func (r UnreachableStepRule) Description() string { return "Detects disconnected or unreachable steps in workflow DAG" }
+func (r UnreachableStepRule) Severity() Severity  { return SeverityWarning }
 
 func (r UnreachableStepRule) Analyze(ast *WorkflowAST) []Diagnostic {
 	if len(ast.Steps) == 0 {
@@ -27,26 +25,20 @@ func (r UnreachableStepRule) Analyze(ast *WorkflowAST) []Diagnostic {
 
 	// Adjacency graph: parent -> children
 	children := make(map[string][]string)
-	inDegree := make(map[string]int)
-
-	for id := range ast.Steps {
-		inDegree[id] = 0
-	}
 
 	for id, step := range ast.Steps {
 		for _, dep := range step.DependsOn {
 			if _, exists := ast.Steps[dep]; exists {
 				children[dep] = append(children[dep], id)
-				inDegree[id]++
 			}
 		}
 	}
 
-	// Roots are nodes with inDegree == 0
+	// True workflow entrypoints are nodes with NO dependencies declared
 	visited := make(map[string]bool)
 	var queue []string
-	for id, deg := range inDegree {
-		if deg == 0 {
+	for id, step := range ast.Steps {
+		if len(step.DependsOn) == 0 {
 			queue = append(queue, id)
 			visited[id] = true
 		}
@@ -84,11 +76,9 @@ func (r UnreachableStepRule) Analyze(ast *WorkflowAST) []Diagnostic {
 // MissingDependencyRule flags references to nonexistent step IDs.
 type MissingDependencyRule struct{}
 
-func (r MissingDependencyRule) ID() string { return RuleIDMissingDependency }
-func (r MissingDependencyRule) Description() string {
-	return "Flags dependencies pointing to non-existent step IDs"
-}
-func (r MissingDependencyRule) Severity() Severity { return SeverityError }
+func (r MissingDependencyRule) ID() string          { return RuleIDMissingDependency }
+func (r MissingDependencyRule) Description() string { return "Flags dependencies pointing to non-existent step IDs" }
+func (r MissingDependencyRule) Severity() Severity  { return SeverityError }
 
 func (r MissingDependencyRule) Analyze(ast *WorkflowAST) []Diagnostic {
 	var diags []Diagnostic
