@@ -115,3 +115,34 @@ func (c *Candidate) State() State {
 	defer c.mu.RUnlock()
 	return c.state
 }
+
+// Term returns the current fencing term.
+func (c *Candidate) Term() uint64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.term
+}
+
+// Campaign attempts a single acquisition of leadership.
+func (c *Candidate) Campaign() (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.state = StateCandidate
+	rec, acquired, err := c.coord.TryAcquireOrRenew(c.id, c.term, c.cfg.LeaseDuration)
+	if err != nil {
+		c.state = StateFollower
+		return false, err
+	}
+
+	if acquired {
+		c.state = StateLeader
+		c.term = rec.Term
+		c.isLeader.Store(true)
+		return true, nil
+	}
+
+	c.state = StateFollower
+	c.isLeader.Store(false)
+	return false, nil
+}
