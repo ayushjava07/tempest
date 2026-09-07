@@ -2,6 +2,7 @@ package leader
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -182,4 +183,34 @@ func TestLeader_ObserverHooks(t *testing.T) {
 	if !revokedFired.Load() {
 		t.Fatalf("expected OnRevoked callback to trigger on Stop")
 	}
+}
+
+func TestLeader_GoleakAndConcurrency(t *testing.T) {
+	coord := NewInMemCoordinator()
+	cfg := Config{
+		LeaseDuration: 40 * time.Millisecond,
+		RenewInterval: 10 * time.Millisecond,
+		RetryInterval: 10 * time.Millisecond,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	const numCandidates = 8
+
+	candidates := make([]*Candidate, numCandidates)
+	for i := 0; i < numCandidates; i++ {
+		c := NewCandidate(string(rune('A'+i)), coord, cfg)
+		candidates[i] = c
+		wg.Add(1)
+		go func(cand *Candidate) {
+			defer wg.Done()
+			cand.Start(ctx)
+			time.Sleep(50 * time.Millisecond)
+			cand.Stop()
+		}(c)
+	}
+
+	wg.Wait()
 }
