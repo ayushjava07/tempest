@@ -133,6 +133,7 @@ func registerCommands(root *Command) {
 		adminCmd(),
 		migrateCmd(),
 		versionCmd(),
+		completionCmd(),
 	}
 }
 
