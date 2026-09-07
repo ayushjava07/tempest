@@ -110,6 +110,30 @@ func (c *Candidate) ID() string {
 	return c.id
 }
 
+// OnElected registers a callback invoked when this node becomes leader.
+func (c *Candidate) OnElected(fn func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onElected = append(c.onElected, fn)
+}
+
+// OnRevoked registers a callback invoked when leadership is lost.
+func (c *Candidate) OnRevoked(fn func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onRevoked = append(c.onRevoked, fn)
+}
+
+// ElectedCh returns a channel signaled when leadership is acquired.
+func (c *Candidate) ElectedCh() <-chan struct{} {
+	return c.electedCh
+}
+
+// RevokedCh returns a channel signaled when leadership is lost.
+func (c *Candidate) RevokedCh() <-chan struct{} {
+	return c.revokedCh
+}
+
 // State returns current election state.
 func (c *Candidate) State() State {
 	c.mu.RLock()

@@ -2,6 +2,7 @@ package leader
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -146,5 +147,39 @@ func TestLeader_ContextCancellation(t *testing.T) {
 
 	if c.State() != StateFollower {
 		t.Fatalf("expected ctx-node to step down to follower after context cancel, got %s", c.State())
+	}
+}
+
+func TestLeader_ObserverHooks(t *testing.T) {
+	coord := NewInMemCoordinator()
+	cfg := Config{
+		LeaseDuration: 50 * time.Millisecond,
+		RenewInterval: 15 * time.Millisecond,
+		RetryInterval: 15 * time.Millisecond,
+	}
+
+	c := NewCandidate("obs-node", coord, cfg)
+
+	var electedFired, revokedFired atomic.Bool
+	c.OnElected(func() {
+		electedFired.Store(true)
+	})
+	c.OnRevoked(func() {
+		revokedFired.Store(true)
+	})
+
+	ctx := context.Background()
+	c.Start(ctx)
+	time.Sleep(30 * time.Millisecond)
+
+	if !electedFired.Load() {
+		t.Fatalf("expected OnElected callback to trigger")
+	}
+
+	c.Stop()
+	time.Sleep(20 * time.Millisecond)
+
+	if !revokedFired.Load() {
+		t.Fatalf("expected OnRevoked callback to trigger on Stop")
 	}
 }
