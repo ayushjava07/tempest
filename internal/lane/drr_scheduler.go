@@ -8,12 +8,13 @@ import (
 
 // DRRScheduler coordinates deficit round-robin scheduling across multiple priority lanes.
 type DRRScheduler struct {
-	mu         sync.Mutex
-	lanes      []*Lane
-	laneMap    map[string]*Lane
-	roundIndex int
-	totalTasks int
-	cond       *sync.Cond
+	mu           sync.Mutex
+	lanes        []*Lane
+	laneMap      map[string]*Lane
+	roundIndex   int
+	quantumAdded bool
+	totalTasks   int
+	cond         *sync.Cond
 }
 
 // NewDRRScheduler creates a DRR scheduler managing the provided lanes.
@@ -31,9 +32,10 @@ func NewDRRScheduler(lanes []*Lane) (*DRRScheduler, error) {
 	}
 
 	s := &DRRScheduler{
-		lanes:      lanes,
-		laneMap:    laneMap,
-		roundIndex: 0,
+		lanes:        lanes,
+		laneMap:      laneMap,
+		roundIndex:   0,
+		quantumAdded: false,
 	}
 	s.cond = sync.NewCond(&s.mu)
 	return s, nil
@@ -62,7 +64,6 @@ func (s *DRRScheduler) Enqueue(task *Task) error {
 
 // ScheduleNext blocks until a task is eligible for dispatch under DRR or context cancellation.
 func (s *DRRScheduler) ScheduleNext(ctx context.Context) (*Task, error) {
-	// Cancel waiter if context finishes
 	doneChan := ctx.Done()
 
 	s.mu.Lock()
@@ -76,7 +77,6 @@ func (s *DRRScheduler) ScheduleNext(ctx context.Context) (*Task, error) {
 		}
 
 		if s.totalTasks == 0 {
-			// Wait for work or context
 			waitCh := make(chan struct{})
 			go func() {
 				select {
@@ -102,7 +102,7 @@ func (s *DRRScheduler) ScheduleNext(ctx context.Context) (*Task, error) {
 			continue
 		}
 
-		// 1. Check for starving lanes (anti-starvation defense)
+		// 1. Anti-starvation defense
 		for _, l := range s.lanes {
 			if l.Len() > 0 && l.IsStarving() {
 				if t, ok := l.Dequeue(); ok {
@@ -113,25 +113,27 @@ func (s *DRRScheduler) ScheduleNext(ctx context.Context) (*Task, error) {
 			}
 		}
 
-		// 2. Standard Deficit Round-Robin progression
+		// 2. Deficit Round-Robin progression
 		numLanes := len(s.lanes)
-		for i := 0; i < numLanes; i++ {
+		for attempts := 0; attempts < numLanes*2; attempts++ {
 			lane := s.lanes[s.roundIndex]
-			s.roundIndex = (s.roundIndex + 1) % numLanes
 
-			if lane.Len() == 0 {
-				lane.mu.Lock()
+			lane.mu.Lock()
+			if len(lane.tasks) == 0 {
 				lane.deficit = 0
 				lane.mu.Unlock()
+				s.roundIndex = (s.roundIndex + 1) % numLanes
+				s.quantumAdded = false
 				continue
 			}
 
-			lane.mu.Lock()
-			// Add round quantum credit
-			lane.deficit += lane.cfg.Quantum
+			if !s.quantumAdded {
+				lane.deficit += lane.cfg.Quantum
+				s.quantumAdded = true
+			}
 
-			head, hasHead := lane.tasks[0], true
-			if hasHead && lane.deficit >= head.Cost {
+			head := lane.tasks[0]
+			if lane.deficit >= head.Cost {
 				// Dequeue task
 				task := lane.tasks[0]
 				lane.tasks = lane.tasks[1:]
@@ -140,13 +142,23 @@ func (s *DRRScheduler) ScheduleNext(ctx context.Context) (*Task, error) {
 
 				if len(lane.tasks) == 0 {
 					lane.deficit = 0
+					s.roundIndex = (s.roundIndex + 1) % numLanes
+					s.quantumAdded = false
+				} else if lane.deficit < lane.tasks[0].Cost {
+					// Next task cannot be served in this turn, advance lane
+					s.roundIndex = (s.roundIndex + 1) % numLanes
+					s.quantumAdded = false
 				}
 				lane.mu.Unlock()
 
 				s.totalTasks--
 				return task, nil
 			}
+
+			// Cannot serve head task, advance to next lane
 			lane.mu.Unlock()
+			s.roundIndex = (s.roundIndex + 1) % numLanes
+			s.quantumAdded = false
 		}
 	}
 }
