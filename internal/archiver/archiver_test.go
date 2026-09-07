@@ -3,6 +3,7 @@ package archiver
 import (
 	"bytes"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,13 +18,13 @@ func sampleRecords(n int) []ArchiveRecord {
 	records := make([]ArchiveRecord, n)
 	for i := 0; i < n; i++ {
 		records[i] = ArchiveRecord{
-			RunID:       fmt.Sprintf("run-%04d", i),
-			WorkflowID:  "order-processing",
-			Namespace:   "production",
-			FinalState:  "SUCCEEDED",
-			StartedAt:   time.Now().Add(-time.Hour),
-			FinishedAt:  time.Now(),
-			Variables:   map[string]string{"customer_id": fmt.Sprintf("cust-%d", i), "region": "us-east-1"},
+			RunID:      fmt.Sprintf("run-%04d", i),
+			WorkflowID: "order-processing",
+			Namespace:  "production",
+			FinalState: "SUCCEEDED",
+			StartedAt:  time.Now().Add(-time.Hour),
+			FinishedAt: time.Now(),
+			Variables:  map[string]string{"customer_id": fmt.Sprintf("cust-%d", i), "region": "us-east-1"},
 			Steps: []StepArchive{
 				{StepID: "validate", State: "SUCCEEDED", ExitCode: 0},
 				{StepID: "charge", State: "SUCCEEDED", ExitCode: 0},
@@ -147,4 +148,64 @@ func TestArchiver_TruncatedStreamRejection(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error on truncated archive stream, got nil")
 	}
+}
+
+func TestArchiver_RetentionPolicyEvaluation(t *testing.T) {
+	now := time.Now()
+	records := []ArchiveRecord{
+		{RunID: "r1-new", FinishedAt: now.Add(-1 * time.Hour), FinalState: "SUCCEEDED"},
+		{RunID: "r2-old", FinishedAt: now.Add(-48 * time.Hour), FinalState: "SUCCEEDED"},
+		{RunID: "r3-failed-old", FinishedAt: now.Add(-72 * time.Hour), FinalState: "FAILED"},
+		{RunID: "r4-ancient", FinishedAt: now.Add(-100 * time.Hour), FinalState: "SUCCEEDED"},
+	}
+
+	policy := RetentionPolicy{
+		MaxAge:         24 * time.Hour,
+		KeepFailed:     true,
+		MinRetainCount: 1, // Keep r1 regardless
+	}
+
+	retain, purge := FilterForRetention(records, now, policy)
+
+	// Retain: r1 (new), r3 (failed exception)
+	// Purge: r2, r4
+	if len(retain) != 2 {
+		t.Fatalf("expected 2 retained runs, got %d", len(retain))
+	}
+	if len(purge) != 2 {
+		t.Fatalf("expected 2 purged runs, got %d", len(purge))
+	}
+
+	for _, r := range retain {
+		if r.RunID == "r2-old" || r.RunID == "r4-ancient" {
+			t.Errorf("unexpected run retained: %s", r.RunID)
+		}
+	}
+}
+
+func TestArchiver_ConcurrentExports(t *testing.T) {
+	exporter := NewExporter()
+	unpacker := NewUnpacker()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			records := sampleRecords(5)
+			var buf bytes.Buffer
+			manifest, err := exporter.Export(records, CodecGzip, &buf)
+			if err != nil {
+				t.Errorf("concurrent export error: %v", err)
+				return
+			}
+			unpacked, err := unpacker.Unpack(&buf, manifest)
+			if err != nil || len(unpacked) != 5 {
+				t.Errorf("concurrent unpack error: %v", err)
+				return
+			}
+		}(i)
+	}
+
+	wg.Wait()
 }
