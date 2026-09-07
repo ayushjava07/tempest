@@ -232,9 +232,11 @@ Author: Ayushjava07 <ayushjhasahab07@gmail.com>
 - 196: test(cli): add CLI mock client integration tests for workflow lifecycle operations
 - 197: feat(cli): add tab-completion script generator for bash and zsh shells
 
-### Batch 15: End-to-End Scenarios & Final Stabilization — Commits 198–202
+### Batch 15: End-to-End Scenarios & Final Stabilization — Commits 198–203
 - 198: test(e2e): add comprehensive multi-step saga failure and rollback scenario
 - 199: test(e2e): add dynamic fan-out map-reduce orchestration scenario with barrier join
 - 200: test(e2e): add workflow pause, external signal resume, and approval gate scenario
 - 201: docs(architecture): add comprehensive architecture diagrams and subsystem reference
 - 202: docs(readme): finalize production deployment guidelines and repository release documentation
+- 203: fix(concurrency): resolve data races in lock, outbox, and cron schedulers
+
